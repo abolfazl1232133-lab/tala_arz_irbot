@@ -1,12 +1,20 @@
 import os
 import logging
 import requests
-from bs4 import BeautifulSoup
+import re
+
 from datetime import datetime
 import pytz
+from bs4 import BeautifulSoup
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
 from telegram.constants import ParseMode
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,7 +28,10 @@ from telegram.ext import (
 # ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "@tala_arz_irr")
+CHANNEL_ID = os.environ.get(
+    "CHANNEL_ID",
+    "@tala_arz_irr"
+)
 
 # هر 5 دقیقه
 UPDATE_INTERVAL = 300
@@ -46,9 +57,11 @@ logger = logging.getLogger(__name__)
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 "
-        "Chrome/131.0.0.0 Safari/537.36"
+        "Chrome/131.0.0.0 "
+        "Safari/537.36"
     ),
     "Accept-Language": "fa-IR,fa;q=0.9,en;q=0.8",
 }
@@ -59,7 +72,12 @@ HEADERS = {
 # ==========================================
 
 def get_iran_time():
-    return datetime.now(IRAN_TZ).strftime("%Y/%m/%d - %H:%M")
+
+    return datetime.now(
+        IRAN_TZ
+    ).strftime(
+        "%Y/%m/%d - %H:%M"
+    )
 
 
 # ==========================================
@@ -72,7 +90,9 @@ def fmt(value):
         return "---"
 
     try:
+
         value = str(value)
+
         value = value.replace(",", "")
         value = value.replace("٬", "")
         value = value.strip()
@@ -82,6 +102,7 @@ def fmt(value):
         return f"{number:,.0f}"
 
     except Exception:
+
         return str(value)
 
 
@@ -91,16 +112,22 @@ def fmt(value):
 
 def rial_to_toman(value):
 
-    try:
-        value = float(
-            str(value)
-            .replace(",", "")
-            .replace("٬", "")
-        )
+    if value is None:
+        return None
 
-        return value / 10
+    try:
+
+        value = str(value)
+
+        value = value.replace(",", "")
+        value = value.replace("٬", "")
+
+        number = float(value)
+
+        return number / 10
 
     except Exception:
+
         return None
 
 
@@ -108,11 +135,19 @@ def rial_to_toman(value):
 # ساخت آیتم قیمت
 # ==========================================
 
-def make_price(label, price, unit):
+def make_price(
+    label,
+    price,
+    unit
+):
 
     return {
         "label": label,
-        "price": fmt(price) if price is not None else "---",
+        "price": (
+            fmt(price)
+            if price is not None
+            else "---"
+        ),
         "unit": unit,
     }
 
@@ -196,11 +231,12 @@ def empty_prices():
             None,
             "تومان"
         ),
+
     }
 
 
 # ==========================================
-# استخراج قیمت از صفحه TGJU
+# دریافت صفحه TGJU
 # ==========================================
 
 def fetch_tgju_page(url):
@@ -212,7 +248,8 @@ def fetch_tgju_page(url):
     )
 
     logger.info(
-        f"TGJU Request: {url} | Status: {response.status_code}"
+        f"TGJU Request: {url} | "
+        f"Status: {response.status_code}"
     )
 
     response.raise_for_status()
@@ -220,28 +257,173 @@ def fetch_tgju_page(url):
     return response.text
 
 
-def find_price_in_html(html, keywords):
+# ==========================================
+# استخراج عدد از متن
+# ==========================================
 
-    soup = BeautifulSoup(html, "html.parser")
+def extract_number(text):
 
-    text_keywords = [
-        str(x).lower()
-        for x in keywords
+    if text is None:
+        return None
+
+    text = str(text)
+
+    text = text.replace(",", "")
+    text = text.replace("٬", "")
+
+    matches = re.findall(
+        r"\d+(?:\.\d+)?",
+        text
+    )
+
+    if not matches:
+        return None
+
+    for match in matches:
+
+        try:
+
+            number = float(match)
+
+            if number > 0:
+                return number
+
+        except Exception:
+            continue
+
+    return None
+
+
+# ==========================================
+# پیدا کردن قیمت دقیق در جدول
+# ==========================================
+
+def find_exact_row_price(
+    html,
+    exact_names
+):
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    exact_names = [
+        str(name)
+        .replace("ي", "ی")
+        .replace("ك", "ک")
+        .strip()
+        for name in exact_names
     ]
 
-    # تمام ردیف‌های جدول
     rows = soup.find_all("tr")
 
     for row in rows:
 
+        cells = row.find_all(
+            ["td", "th"]
+        )
+
+        if len(cells) < 2:
+            continue
+
+        row_name = cells[0].get_text(
+            " ",
+            strip=True
+        )
+
+        row_name = (
+            row_name
+            .replace("ي", "ی")
+            .replace("ك", "ک")
+            .strip()
+        )
+
+        matched = False
+
+        for name in exact_names:
+
+            if row_name == name:
+
+                matched = True
+                break
+
+        if not matched:
+            continue
+
+        # فقط ستون‌های بعد از نام را بررسی می‌کنیم
+        for cell in cells[1:]:
+
+            text = cell.get_text(
+                " ",
+                strip=True
+            )
+
+            number = extract_number(
+                text
+            )
+
+            if number is not None:
+
+                logger.info(
+                    f"Found price for "
+                    f"{row_name}: {number}"
+                )
+
+                return number
+
+    return None
+
+
+# ==========================================
+# پیدا کردن قیمت با کلمات کلیدی
+# ==========================================
+
+def find_price_in_html(
+    html,
+    keywords
+):
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    rows = soup.find_all("tr")
+
+    keywords = [
+        str(x)
+        .replace("ي", "ی")
+        .replace("ك", "ک")
+        .lower()
+        .strip()
+        for x in keywords
+    ]
+
+    for row in rows:
+
+        cells = row.find_all(
+            ["td", "th"]
+        )
+
+        if len(cells) < 2:
+            continue
+
         row_text = row.get_text(
             " ",
             strip=True
-        ).lower()
+        )
+
+        row_text = (
+            row_text
+            .replace("ي", "ی")
+            .replace("ك", "ک")
+            .lower()
+        )
 
         found = False
 
-        for keyword in text_keywords:
+        for keyword in keywords:
 
             if keyword in row_text:
 
@@ -251,34 +433,105 @@ def find_price_in_html(html, keywords):
         if not found:
             continue
 
-        # جستجو در td ها
-        cells = row.find_all(["td", "th"])
+        # قیمت را از ستون‌های عددی می‌گیریم
+        for cell in cells[1:]:
 
-        for cell in reversed(cells):
-
-            value = cell.get_text(
+            text = cell.get_text(
                 " ",
                 strip=True
             )
 
-            cleaned = (
-                value
-                .replace(",", "")
-                .replace("٬", "")
-                .replace(" ", "")
+            number = extract_number(
+                text
             )
 
-            try:
+            if number is not None:
 
-                number = float(cleaned)
-
-                if number > 0:
-                    return number
-
-            except Exception:
-                continue
+                return number
 
     return None
+
+
+# ==========================================
+# دریافت قیمت اونس جهانی طلا
+# ==========================================
+
+def get_gold_ounce():
+
+    try:
+
+        html = fetch_tgju_page(
+            "https://www.tgju.org/profile/ons"
+        )
+
+        soup = BeautifulSoup(
+            html,
+            "html.parser"
+        )
+
+        # روش اول: پیدا کردن عبارت نرخ فعلی
+        text = soup.get_text(
+            "\n",
+            strip=True
+        )
+
+        patterns = [
+
+            r"نرخ فعلی\s*[:：]?\s*([\d,٬.]+)",
+
+            r"قیمت فعلی\s*[:：]?\s*([\d,٬.]+)",
+
+        ]
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                text
+            )
+
+            if match:
+
+                number = extract_number(
+                    match.group(1)
+                )
+
+                if number:
+
+                    logger.info(
+                        f"Gold ounce found: {number}"
+                    )
+
+                    return number
+
+
+        # روش دوم: جدول
+        number = find_price_in_html(
+            html,
+            [
+                "انس طلا",
+                "اونس طلا",
+                "انس جهانی",
+            ]
+        )
+
+        if number:
+
+            return number
+
+        logger.warning(
+            "Gold ounce not found"
+        )
+
+        return None
+
+    except Exception as error:
+
+        logger.exception(
+            f"Gold ounce ERROR: {error}"
+        )
+
+        return None
 
 
 # ==========================================
@@ -291,48 +544,129 @@ def get_gold_market():
         "https://www.tgju.org/gold-chart"
     )
 
+
+    # -----------------------------
+    # طلای 18
+    # -----------------------------
+
+    gold_18 = find_exact_row_price(
+        html,
+        [
+            "طلای ۱۸ عیار / ۷۵۰",
+            "طلای 18 عیار / 750",
+        ]
+    )
+
+
+    # اگر دقیق پیدا نشد
+    if gold_18 is None:
+
+        gold_18 = find_price_in_html(
+            html,
+            [
+                "طلای ۱۸ عیار / ۷۵۰",
+                "طلای 18 عیار / 750",
+            ]
+        )
+
+
+    # -----------------------------
+    # طلای 24
+    # -----------------------------
+
+    gold_24 = find_exact_row_price(
+        html,
+        [
+            "طلای ۲۴ عیار",
+            "طلای 24 عیار",
+        ]
+    )
+
+
+    if gold_24 is None:
+
+        gold_24 = find_price_in_html(
+            html,
+            [
+                "طلای ۲۴ عیار",
+                "طلای 24 عیار",
+            ]
+        )
+
+
+    # -----------------------------
+    # مثقال
+    # -----------------------------
+
+    mesghal = find_exact_row_price(
+        html,
+        [
+            "مثقال طلا",
+        ]
+    )
+
+
+    if mesghal is None:
+
+        mesghal = find_price_in_html(
+            html,
+            [
+                "مثقال طلا",
+            ]
+        )
+
+
+    # -----------------------------
+    # آبشده
+    # -----------------------------
+
+    abshode = find_exact_row_price(
+        html,
+        [
+            "آبشده نقدی",
+        ]
+    )
+
+
+    if abshode is None:
+
+        abshode = find_price_in_html(
+            html,
+            [
+                "آبشده نقدی",
+            ]
+        )
+
+
+    # -----------------------------
+    # اونس جهانی
+    # -----------------------------
+
+    gold_ounce = get_gold_ounce()
+
+
+    logger.info(
+        "GOLD DATA: "
+        f"18={gold_18}, "
+        f"24={gold_24}, "
+        f"Mesghal={mesghal}, "
+        f"Abshode={abshode}, "
+        f"Ounce={gold_ounce}"
+    )
+
+
     return {
 
-        "gold_18": find_price_in_html(
-            html,
-            [
-                "طلای 18",
-                "طلای ۱۸",
-                "geram18",
-            ]
-        ),
+        "gold_18": gold_18,
 
-        "gold_24": find_price_in_html(
-            html,
-            [
-                "طلای 24",
-                "طلای ۲۴",
-                "geram24",
-            ]
-        ),
+        "gold_24": gold_24,
 
-        "gold_abshode": find_price_in_html(
-            html,
-            [
-                "آبشده",
-            ]
-        ),
+        "gold_abshode": abshode,
 
-        "gold_mesghal": find_price_in_html(
-            html,
-            [
-                "مثقال",
-            ]
-        ),
+        "gold_mesghal": mesghal,
 
-        "gold_ounce": find_price_in_html(
-            html,
-            [
-                "انس طلا",
-                "اونس طلا",
-                "انس",
-            ]
-        ),
+        "gold_ounce": gold_ounce,
+
     }
 
 
@@ -363,6 +697,7 @@ def get_currency_market():
                 "EUR",
             ]
         ),
+
     }
 
 
@@ -392,6 +727,7 @@ def get_coin_market():
                 "نیم سکه",
             ]
         ),
+
     }
 
 
@@ -415,7 +751,8 @@ def get_crypto_prices():
     )
 
     logger.info(
-        f"CoinGecko Status: {response.status_code}"
+        f"CoinGecko Status: "
+        f"{response.status_code}"
     )
 
     response.raise_for_status()
@@ -441,6 +778,7 @@ def get_crypto_prices():
             .get("tether", {})
             .get("usd")
         ),
+
     }
 
 
@@ -453,15 +791,18 @@ def fetch_all_prices():
     prices = empty_prices()
 
 
-    # -------------------------------
+    # -----------------------------
     # طلا
-    # -------------------------------
+    # -----------------------------
 
     try:
 
-        logger.info("Getting gold prices...")
+        logger.info(
+            "Getting gold prices..."
+        )
 
         gold = get_gold_market()
+
 
         prices["gold_18"] = make_price(
             "طلای ۱۸ عیار (گرم)",
@@ -471,6 +812,7 @@ def fetch_all_prices():
             "تومان"
         )
 
+
         prices["gold_24"] = make_price(
             "طلای ۲۴ عیار (گرم)",
             rial_to_toman(
@@ -478,6 +820,7 @@ def fetch_all_prices():
             ),
             "تومان"
         )
+
 
         prices["gold_abshode"] = make_price(
             "طلای آبشده",
@@ -487,6 +830,7 @@ def fetch_all_prices():
             "تومان"
         )
 
+
         prices["gold_mesghal"] = make_price(
             "مثقال طلا",
             rial_to_toman(
@@ -495,11 +839,13 @@ def fetch_all_prices():
             "تومان"
         )
 
+
         prices["gold_ounce"] = make_price(
             "اونس جهانی طلا",
             gold.get("gold_ounce"),
             "دلار"
         )
+
 
     except Exception as error:
 
@@ -508,15 +854,18 @@ def fetch_all_prices():
         )
 
 
-    # -------------------------------
+    # -----------------------------
     # ارز
-    # -------------------------------
+    # -----------------------------
 
     try:
 
-        logger.info("Getting currency prices...")
+        logger.info(
+            "Getting currency prices..."
+        )
 
         currency = get_currency_market()
+
 
         prices["usd"] = make_price(
             "دلار آمریکا",
@@ -526,6 +875,7 @@ def fetch_all_prices():
             "تومان"
         )
 
+
         prices["eur"] = make_price(
             "یورو",
             rial_to_toman(
@@ -534,6 +884,7 @@ def fetch_all_prices():
             "تومان"
         )
 
+
     except Exception as error:
 
         logger.exception(
@@ -541,15 +892,18 @@ def fetch_all_prices():
         )
 
 
-    # -------------------------------
+    # -----------------------------
     # سکه
-    # -------------------------------
+    # -----------------------------
 
     try:
 
-        logger.info("Getting coin prices...")
+        logger.info(
+            "Getting coin prices..."
+        )
 
         coins = get_coin_market()
+
 
         prices["sekke_emami"] = make_price(
             "سکه امامی",
@@ -559,6 +913,7 @@ def fetch_all_prices():
             "تومان"
         )
 
+
         prices["sekke_nim"] = make_price(
             "نیم سکه",
             rial_to_toman(
@@ -567,6 +922,7 @@ def fetch_all_prices():
             "تومان"
         )
 
+
     except Exception as error:
 
         logger.exception(
@@ -574,15 +930,18 @@ def fetch_all_prices():
         )
 
 
-    # -------------------------------
+    # -----------------------------
     # کریپتو
-    # -------------------------------
+    # -----------------------------
 
     try:
 
-        logger.info("Getting crypto prices...")
+        logger.info(
+            "Getting crypto prices..."
+        )
 
         crypto = get_crypto_prices()
+
 
         prices["bitcoin"] = make_price(
             "بیت‌کوین",
@@ -590,15 +949,15 @@ def fetch_all_prices():
             "دلار"
         )
 
+
         prices["ethereum"] = make_price(
             "اتریوم",
             crypto.get("ethereum"),
             "دلار"
         )
 
-        # برای قیمت تتر به تومان
-        # از قیمت دلار آزاد استفاده می‌کنیم
 
+        # تتر تقریباً برابر دلار آزاد
         usd_price = prices["usd"]["price"]
 
         if usd_price != "---":
@@ -612,6 +971,7 @@ def fetch_all_prices():
                 tether_toman,
                 "تومان"
             )
+
 
     except Exception as error:
 
@@ -635,23 +995,34 @@ def format_message(prices):
 
     now = get_iran_time()
 
+
     lines = [
 
         "📊 *قیمت‌های لحظه‌ای بازار*",
+
         f"🕐 آخرین به‌روزرسانی: `{now}`",
+
         "",
+
         "━━━━━━━━━━━━━━━━━━",
+
         "🥇 *فلزات گرانبها*",
 
     ]
 
 
     for key in [
+
         "gold_18",
+
         "gold_24",
+
         "gold_abshode",
+
         "gold_mesghal",
+
         "gold_ounce",
+
     ]:
 
         p = prices[key]
@@ -664,15 +1035,22 @@ def format_message(prices):
 
 
     lines += [
+
         "",
+
         "━━━━━━━━━━━━━━━━━━",
+
         "🪙 *سکه*",
+
     ]
 
 
     for key in [
+
         "sekke_emami",
+
         "sekke_nim",
+
     ]:
 
         p = prices[key]
@@ -685,16 +1063,24 @@ def format_message(prices):
 
 
     lines += [
+
         "",
+
         "━━━━━━━━━━━━━━━━━━",
+
         "💰 *ارز دیجیتال*",
+
     ]
 
 
     for key in [
+
         "bitcoin",
+
         "ethereum",
+
         "tether",
+
     ]:
 
         p = prices[key]
@@ -707,15 +1093,22 @@ def format_message(prices):
 
 
     lines += [
+
         "",
+
         "━━━━━━━━━━━━━━━━━━",
+
         "💵 *ارزهای خارجی*",
+
     ]
 
 
     for key in [
+
         "usd",
+
         "eur",
+
     ]:
 
         p = prices[key]
@@ -728,9 +1121,13 @@ def format_message(prices):
 
 
     lines += [
+
         "",
+
         "━━━━━━━━━━━━━━━━━━",
+
         "🤖 @tala\\_arz\\_irr"
+
     ]
 
 
@@ -749,13 +1146,16 @@ async def start(
     keyboard = [
 
         [
+
             InlineKeyboardButton(
                 "📊 همه قیمت‌ها",
                 callback_data="prices"
             )
+
         ],
 
         [
+
             InlineKeyboardButton(
                 "🥇 طلا و سکه",
                 callback_data="gold"
@@ -765,22 +1165,31 @@ async def start(
                 "💰 کریپتو",
                 callback_data="crypto"
             ),
+
         ],
 
         [
+
             InlineKeyboardButton(
                 "💵 ارز",
                 callback_data="fiat"
             )
+
         ],
+
     ]
 
 
     await update.message.reply_text(
+
         "سلام! 👋\n\n"
         "به ربات قیمت طلا و ارز خوش اومدی.\n"
         "از منوی زیر انتخاب کن:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
+
     )
 
 
@@ -806,12 +1215,15 @@ async def button_handler(
 
     if query.data == "prices":
 
-        message = format_message(prices)
+        message = format_message(
+            prices
+        )
 
 
     elif query.data == "gold":
 
         keys = [
+
             "gold_18",
             "gold_24",
             "gold_abshode",
@@ -819,12 +1231,16 @@ async def button_handler(
             "gold_ounce",
             "sekke_emami",
             "sekke_nim",
+
         ]
 
         lines = [
+
             "🥇 *طلا و سکه*",
             ""
+
         ]
+
 
         for key in keys:
 
@@ -835,6 +1251,7 @@ async def button_handler(
                 f"`{p['price']}` "
                 f"{p['unit']}"
             )
+
 
         message = "\n".join(lines)
 
@@ -842,15 +1259,20 @@ async def button_handler(
     elif query.data == "crypto":
 
         keys = [
+
             "bitcoin",
             "ethereum",
             "tether",
+
         ]
 
         lines = [
+
             "💰 *ارزهای دیجیتال*",
             ""
+
         ]
+
 
         for key in keys:
 
@@ -861,6 +1283,7 @@ async def button_handler(
                 f"`{p['price']}` "
                 f"{p['unit']}"
             )
+
 
         message = "\n".join(lines)
 
@@ -868,14 +1291,19 @@ async def button_handler(
     elif query.data == "fiat":
 
         keys = [
+
             "usd",
             "eur",
+
         ]
 
         lines = [
+
             "💵 *ارزهای خارجی*",
             ""
+
         ]
+
 
         for key in keys:
 
@@ -886,6 +1314,7 @@ async def button_handler(
                 f"`{p['price']}` "
                 f"{p['unit']}"
             )
+
 
         message = "\n".join(lines)
 
@@ -912,7 +1341,9 @@ async def price_command(
 
     prices = fetch_all_prices()
 
-    message = format_message(prices)
+    message = format_message(
+        prices
+    )
 
     await update.message.reply_text(
         message,
@@ -932,17 +1363,24 @@ async def send_to_channel(
 
         prices = fetch_all_prices()
 
-        message = format_message(prices)
+        message = format_message(
+            prices
+        )
 
         await context.bot.send_message(
+
             chat_id=CHANNEL_ID,
+
             text=message,
+
             parse_mode=ParseMode.MARKDOWN
+
         )
 
         logger.info(
             "Channel updated successfully"
         )
+
 
     except Exception as error:
 
@@ -995,9 +1433,13 @@ def main():
 
 
     app.job_queue.run_repeating(
+
         send_to_channel,
+
         interval=UPDATE_INTERVAL,
+
         first=10
+
     )
 
 
