@@ -1,20 +1,12 @@
 import os
 import logging
 import requests
-import json
-import re
-
+from bs4 import BeautifulSoup
 from datetime import datetime
 import pytz
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -23,21 +15,22 @@ from telegram.ext import (
 )
 
 
-# ==================================================
+# ==========================================
 # تنظیمات
-# ==================================================
+# ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@tala_arz_irr")
 
+# هر 5 دقیقه
 UPDATE_INTERVAL = 300
 
 IRAN_TZ = pytz.timezone("Asia/Tehran")
 
 
-# ==================================================
+# ==========================================
 # لاگ
-# ==================================================
+# ==========================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,20 +40,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ==================================================
+# ==========================================
+# تنظیمات درخواست
+# ==========================================
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "fa-IR,fa;q=0.9,en;q=0.8",
+}
+
+
+# ==========================================
 # زمان ایران
-# ==================================================
+# ==========================================
 
 def get_iran_time():
-
-    return datetime.now(IRAN_TZ).strftime(
-        "%Y/%m/%d - %H:%M"
-    )
+    return datetime.now(IRAN_TZ).strftime("%Y/%m/%d - %H:%M")
 
 
-# ==================================================
+# ==========================================
 # فرمت قیمت
-# ==================================================
+# ==========================================
 
 def fmt(value):
 
@@ -68,1069 +72,769 @@ def fmt(value):
         return "---"
 
     try:
-
         value = str(value)
-
         value = value.replace(",", "")
         value = value.replace("٬", "")
+        value = value.strip()
 
         number = float(value)
 
         return f"{number:,.0f}"
 
     except Exception:
-
         return str(value)
 
 
-# ==================================================
-# ساخت آیتم قیمت
-# ==================================================
+# ==========================================
+# ریال به تومان
+# ==========================================
 
-def price_item(label, price, unit):
+def rial_to_toman(value):
+
+    try:
+        value = float(
+            str(value)
+            .replace(",", "")
+            .replace("٬", "")
+        )
+
+        return value / 10
+
+    except Exception:
+        return None
+
+
+# ==========================================
+# ساخت آیتم قیمت
+# ==========================================
+
+def make_price(label, price, unit):
 
     return {
         "label": label,
         "price": fmt(price) if price is not None else "---",
-        "unit": unit
+        "unit": unit,
     }
 
 
-# ==================================================
-# پیدا کردن تمام دیکشنری‌ها
-# ==================================================
+# ==========================================
+# قیمت‌های خالی
+# ==========================================
 
-def find_all_dicts(data):
+def empty_prices():
 
-    result = []
+    return {
 
-    if isinstance(data, dict):
+        "gold_18": make_price(
+            "طلای ۱۸ عیار (گرم)",
+            None,
+            "تومان"
+        ),
 
-        result.append(data)
+        "gold_24": make_price(
+            "طلای ۲۴ عیار (گرم)",
+            None,
+            "تومان"
+        ),
 
-        for value in data.values():
+        "gold_abshode": make_price(
+            "طلای آبشده",
+            None,
+            "تومان"
+        ),
 
-            result.extend(
-                find_all_dicts(value)
-            )
+        "gold_mesghal": make_price(
+            "مثقال طلا",
+            None,
+            "تومان"
+        ),
 
-    elif isinstance(data, list):
+        "gold_ounce": make_price(
+            "اونس جهانی طلا",
+            None,
+            "دلار"
+        ),
 
-        for item in data:
+        "sekke_emami": make_price(
+            "سکه امامی",
+            None,
+            "تومان"
+        ),
 
-            result.extend(
-                find_all_dicts(item)
-            )
+        "sekke_nim": make_price(
+            "نیم سکه",
+            None,
+            "تومان"
+        ),
 
-    return result
+        "bitcoin": make_price(
+            "بیت‌کوین",
+            None,
+            "دلار"
+        ),
 
+        "ethereum": make_price(
+            "اتریوم",
+            None,
+            "دلار"
+        ),
 
-# ==================================================
-# استخراج عدد
-# ==================================================
+        "tether": make_price(
+            "تتر",
+            None,
+            "تومان"
+        ),
 
-def extract_number(value):
+        "usd": make_price(
+            "دلار آمریکا",
+            None,
+            "تومان"
+        ),
 
-    if value is None:
-        return None
-
-    try:
-
-        if isinstance(value, (int, float)):
-            return float(value)
-
-        text = str(value)
-
-        text = text.replace(",", "")
-        text = text.replace("٬", "")
-
-        match = re.search(
-            r"[-+]?\d*\.?\d+",
-            text
-        )
-
-        if match:
-
-            return float(
-                match.group()
-            )
-
-    except Exception:
-
-        return None
-
-    return None
-
-
-# ==================================================
-# تبدیل ریال به تومان
-# ==================================================
-
-def rial_to_toman(value):
-
-    number = extract_number(value)
-
-    if number is None:
-        return None
-
-    return number / 10
-
-
-# ==================================================
-# دریافت داده بازار از TGJU
-# ==================================================
-
-def get_tgju_data():
-
-    urls = [
-
-        "https://www.tgju.org/economics/api/swaggerui/swagger.json",
-
-        "https://www.tgju.org/news/api/v1/openapi.json",
-
-        "https://www.tgju.org/global-markets/swagger.json",
-
-    ]
-
-    headers = {
-
-        "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-
-        "Accept":
-            "application/json,text/html,*/*",
-
-        "Accept-Language":
-            "fa-IR,fa;q=0.9,en;q=0.8",
-
+        "eur": make_price(
+            "یورو",
+            None,
+            "تومان"
+        ),
     }
 
 
-    for url in urls:
+# ==========================================
+# استخراج قیمت از صفحه TGJU
+# ==========================================
 
-        try:
+def fetch_tgju_page(url):
 
-            logger.info(
-                f"Trying TGJU: {url}"
-            )
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=25
+    )
 
-            response = requests.get(
+    logger.info(
+        f"TGJU Request: {url} | Status: {response.status_code}"
+    )
 
-                url,
+    response.raise_for_status()
 
-                headers=headers,
-
-                timeout=20
-
-            )
-
-            logger.info(
-                f"TGJU Status: {response.status_code}"
-            )
+    return response.text
 
 
-            if response.status_code == 200:
+def find_price_in_html(html, keywords):
 
-                logger.info(
-                    f"TGJU Response Preview: "
-                    f"{response.text[:500]}"
-                )
+    soup = BeautifulSoup(html, "html.parser")
 
-                return response.json()
-
-
-        except Exception as error:
-
-            logger.error(
-                f"TGJU request error: {error}"
-            )
-
-
-    return None
-
-
-# ==================================================
-# پیدا کردن قیمت
-# ==================================================
-
-def search_price(data, keywords):
-
-    if not data:
-        return None
-
-
-    keywords = [
-
-        str(keyword).lower()
-
-        for keyword in keywords
-
+    text_keywords = [
+        str(x).lower()
+        for x in keywords
     ]
 
+    # تمام ردیف‌های جدول
+    rows = soup.find_all("tr")
 
-    all_dicts = find_all_dicts(data)
+    for row in rows:
 
-
-    for item in all_dicts:
-
-        searchable_parts = []
-
-
-        for key in [
-
-            "key",
-            "name",
-            "title",
-            "symbol",
-            "label",
-            "title_fa",
-            "name_fa",
-            "slug",
-            "code",
-
-        ]:
-
-            value = item.get(key)
-
-            if value:
-
-                searchable_parts.append(
-                    str(value).lower()
-                )
-
-
-        searchable_text = " ".join(
-            searchable_parts
-        )
-
+        row_text = row.get_text(
+            " ",
+            strip=True
+        ).lower()
 
         found = False
 
+        for keyword in text_keywords:
 
-        for keyword in keywords:
-
-            if keyword in searchable_text:
+            if keyword in row_text:
 
                 found = True
-
                 break
 
-
         if not found:
-
             continue
 
+        # جستجو در td ها
+        cells = row.find_all(["td", "th"])
 
-        for price_key in [
+        for cell in reversed(cells):
 
-            "price",
-            "current",
-            "value",
-            "last",
-            "close",
-            "p",
+            value = cell.get_text(
+                " ",
+                strip=True
+            )
 
-        ]:
+            cleaned = (
+                value
+                .replace(",", "")
+                .replace("٬", "")
+                .replace(" ", "")
+            )
 
-            value = item.get(price_key)
+            try:
 
-            if value is not None:
+                number = float(cleaned)
 
-                number = extract_number(value)
-
-                if number is not None:
-
+                if number > 0:
                     return number
 
+            except Exception:
+                continue
 
     return None
 
 
-# ==================================================
-# دریافت همه قیمت‌ها
-# ==================================================
+# ==========================================
+# دریافت بازار طلا
+# ==========================================
 
-def fetch_all_prices():
+def get_gold_market():
 
-    logger.info(
-        "Getting market prices..."
+    html = fetch_tgju_page(
+        "https://www.tgju.org/gold-chart"
     )
 
-
-    data = get_tgju_data()
-
-
-    if not data:
-
-        logger.error(
-            "Could not get market data"
-        )
-
-        return get_empty_prices()
-
-
-    # ------------------------------------------------
-    # طلا 18
-    # ------------------------------------------------
-
-    gold_18 = search_price(
-
-        data,
-
-        [
-
-            "geram18",
-
-            "طلای 18",
-
-            "طلای ۱۸",
-
-            "gold18",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # طلا 24
-    # ------------------------------------------------
-
-    gold_24 = search_price(
-
-        data,
-
-        [
-
-            "geram24",
-
-            "طلای 24",
-
-            "طلای ۲۴",
-
-            "gold24",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # آبشده
-    # ------------------------------------------------
-
-    abshode = search_price(
-
-        data,
-
-        [
-
-            "abshode",
-
-            "آبشده",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # مثقال
-    # ------------------------------------------------
-
-    mesghal = search_price(
-
-        data,
-
-        [
-
-            "mesghal",
-
-            "مثقال",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # اونس جهانی طلا
-    # ------------------------------------------------
-
-    gold_ounce = search_price(
-
-        data,
-
-        [
-
-            "ons",
-
-            "ounce",
-
-            "اونس طلا",
-
-            "انس طلا",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # دلار
-    # ------------------------------------------------
-
-    usd = search_price(
-
-        data,
-
-        [
-
-            "usd",
-
-            "دلار",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # یورو
-    # ------------------------------------------------
-
-    eur = search_price(
-
-        data,
-
-        [
-
-            "eur",
-
-            "یورو",
-
-            "euro",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # سکه امامی
-    # ------------------------------------------------
-
-    sekke_emami = search_price(
-
-        data,
-
-        [
-
-            "sekee",
-
-            "sekke",
-
-            "امامی",
-
-            "سکه امامی",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # نیم سکه
-    # ------------------------------------------------
-
-    sekke_nim = search_price(
-
-        data,
-
-        [
-
-            "nim",
-
-            "نیم سکه",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # بیت کوین
-    # ------------------------------------------------
-
-    bitcoin = search_price(
-
-        data,
-
-        [
-
-            "bitcoin",
-
-            "btc",
-
-            "بیت کوین",
-
-            "بیت‌کوین",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # اتریوم
-    # ------------------------------------------------
-
-    ethereum = search_price(
-
-        data,
-
-        [
-
-            "ethereum",
-
-            "eth",
-
-            "اتریوم",
-
-        ]
-
-    )
-
-
-    # ------------------------------------------------
-    # تتر
-    # ------------------------------------------------
-
-    tether = search_price(
-
-        data,
-
-        [
-
-            "tether",
-
-            "usdt",
-
-            "تتر",
-
-        ]
-
-    )
-
-
-    prices = {
-
-
-        "gold_18": price_item(
-
-            "طلای ۱۸ عیار (گرم)",
-
-            rial_to_toman(gold_18),
-
-            "تومان"
-
+    return {
+
+        "gold_18": find_price_in_html(
+            html,
+            [
+                "طلای 18",
+                "طلای ۱۸",
+                "geram18",
+            ]
         ),
 
-
-        "gold_24": price_item(
-
-            "طلای ۲۴ عیار (گرم)",
-
-            rial_to_toman(gold_24),
-
-            "تومان"
-
+        "gold_24": find_price_in_html(
+            html,
+            [
+                "طلای 24",
+                "طلای ۲۴",
+                "geram24",
+            ]
         ),
 
-
-        "gold_abshode": price_item(
-
-            "طلای آبشده",
-
-            rial_to_toman(abshode),
-
-            "تومان"
-
+        "gold_abshode": find_price_in_html(
+            html,
+            [
+                "آبشده",
+            ]
         ),
 
-
-        "gold_mesghal": price_item(
-
-            "مثقال طلا",
-
-            rial_to_toman(mesghal),
-
-            "تومان"
-
+        "gold_mesghal": find_price_in_html(
+            html,
+            [
+                "مثقال",
+            ]
         ),
 
-
-        "gold_ounce": price_item(
-
-            "اونس جهانی طلا",
-
-            gold_ounce,
-
-            "دلار"
-
+        "gold_ounce": find_price_in_html(
+            html,
+            [
+                "انس طلا",
+                "اونس طلا",
+                "انس",
+            ]
         ),
-
-
-        "sekke_emami": price_item(
-
-            "سکه امامی",
-
-            rial_to_toman(sekke_emami),
-
-            "تومان"
-
-        ),
-
-
-        "sekke_nim": price_item(
-
-            "نیم سکه",
-
-            rial_to_toman(sekke_nim),
-
-            "تومان"
-
-        ),
-
-
-        "bitcoin": price_item(
-
-            "بیت‌کوین",
-
-            bitcoin,
-
-            "دلار"
-
-        ),
-
-
-        "ethereum": price_item(
-
-            "اتریوم",
-
-            ethereum,
-
-            "دلار"
-
-        ),
-
-
-        "tether": price_item(
-
-            "تتر",
-
-            rial_to_toman(tether),
-
-            "تومان"
-
-        ),
-
-
-        "usd": price_item(
-
-            "دلار آمریکا",
-
-            rial_to_toman(usd),
-
-            "تومان"
-
-        ),
-
-
-        "eur": price_item(
-
-            "یورو",
-
-            rial_to_toman(eur),
-
-            "تومان"
-
-        ),
-
     }
 
 
-    logger.info(
-        f"Prices received: {prices}"
+# ==========================================
+# دریافت ارز
+# ==========================================
+
+def get_currency_market():
+
+    html = fetch_tgju_page(
+        "https://www.tgju.org/currency"
     )
 
+    return {
+
+        "usd": find_price_in_html(
+            html,
+            [
+                "دلار",
+                "USD",
+            ]
+        ),
+
+        "eur": find_price_in_html(
+            html,
+            [
+                "یورو",
+                "EUR",
+            ]
+        ),
+    }
+
+
+# ==========================================
+# دریافت سکه
+# ==========================================
+
+def get_coin_market():
+
+    html = fetch_tgju_page(
+        "https://www.tgju.org/coin"
+    )
+
+    return {
+
+        "sekke_emami": find_price_in_html(
+            html,
+            [
+                "سکه امامی",
+                "سکه طرح جدید",
+            ]
+        ),
+
+        "sekke_nim": find_price_in_html(
+            html,
+            [
+                "نیم سکه",
+            ]
+        ),
+    }
+
+
+# ==========================================
+# دریافت کریپتو
+# ==========================================
+
+def get_crypto_prices():
+
+    url = (
+        "https://api.coingecko.com/api/v3/"
+        "simple/price"
+        "?ids=bitcoin,ethereum,tether"
+        "&vs_currencies=usd"
+    )
+
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=20
+    )
+
+    logger.info(
+        f"CoinGecko Status: {response.status_code}"
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    return {
+
+        "bitcoin": (
+            data
+            .get("bitcoin", {})
+            .get("usd")
+        ),
+
+        "ethereum": (
+            data
+            .get("ethereum", {})
+            .get("usd")
+        ),
+
+        "tether_usd": (
+            data
+            .get("tether", {})
+            .get("usd")
+        ),
+    }
+
+
+# ==========================================
+# دریافت همه قیمت‌ها
+# ==========================================
+
+def fetch_all_prices():
+
+    prices = empty_prices()
+
+
+    # -------------------------------
+    # طلا
+    # -------------------------------
+
+    try:
+
+        logger.info("Getting gold prices...")
+
+        gold = get_gold_market()
+
+        prices["gold_18"] = make_price(
+            "طلای ۱۸ عیار (گرم)",
+            rial_to_toman(
+                gold.get("gold_18")
+            ),
+            "تومان"
+        )
+
+        prices["gold_24"] = make_price(
+            "طلای ۲۴ عیار (گرم)",
+            rial_to_toman(
+                gold.get("gold_24")
+            ),
+            "تومان"
+        )
+
+        prices["gold_abshode"] = make_price(
+            "طلای آبشده",
+            rial_to_toman(
+                gold.get("gold_abshode")
+            ),
+            "تومان"
+        )
+
+        prices["gold_mesghal"] = make_price(
+            "مثقال طلا",
+            rial_to_toman(
+                gold.get("gold_mesghal")
+            ),
+            "تومان"
+        )
+
+        prices["gold_ounce"] = make_price(
+            "اونس جهانی طلا",
+            gold.get("gold_ounce"),
+            "دلار"
+        )
+
+    except Exception as error:
+
+        logger.exception(
+            f"Gold ERROR: {error}"
+        )
+
+
+    # -------------------------------
+    # ارز
+    # -------------------------------
+
+    try:
+
+        logger.info("Getting currency prices...")
+
+        currency = get_currency_market()
+
+        prices["usd"] = make_price(
+            "دلار آمریکا",
+            rial_to_toman(
+                currency.get("usd")
+            ),
+            "تومان"
+        )
+
+        prices["eur"] = make_price(
+            "یورو",
+            rial_to_toman(
+                currency.get("eur")
+            ),
+            "تومان"
+        )
+
+    except Exception as error:
+
+        logger.exception(
+            f"Currency ERROR: {error}"
+        )
+
+
+    # -------------------------------
+    # سکه
+    # -------------------------------
+
+    try:
+
+        logger.info("Getting coin prices...")
+
+        coins = get_coin_market()
+
+        prices["sekke_emami"] = make_price(
+            "سکه امامی",
+            rial_to_toman(
+                coins.get("sekke_emami")
+            ),
+            "تومان"
+        )
+
+        prices["sekke_nim"] = make_price(
+            "نیم سکه",
+            rial_to_toman(
+                coins.get("sekke_nim")
+            ),
+            "تومان"
+        )
+
+    except Exception as error:
+
+        logger.exception(
+            f"Coin ERROR: {error}"
+        )
+
+
+    # -------------------------------
+    # کریپتو
+    # -------------------------------
+
+    try:
+
+        logger.info("Getting crypto prices...")
+
+        crypto = get_crypto_prices()
+
+        prices["bitcoin"] = make_price(
+            "بیت‌کوین",
+            crypto.get("bitcoin"),
+            "دلار"
+        )
+
+        prices["ethereum"] = make_price(
+            "اتریوم",
+            crypto.get("ethereum"),
+            "دلار"
+        )
+
+        # برای قیمت تتر به تومان
+        # از قیمت دلار آزاد استفاده می‌کنیم
+
+        usd_price = prices["usd"]["price"]
+
+        if usd_price != "---":
+
+            tether_toman = float(
+                usd_price.replace(",", "")
+            )
+
+            prices["tether"] = make_price(
+                "تتر",
+                tether_toman,
+                "تومان"
+            )
+
+    except Exception as error:
+
+        logger.exception(
+            f"Crypto ERROR: {error}"
+        )
+
+
+    logger.info(
+        f"FINAL PRICES: {prices}"
+    )
 
     return prices
 
 
-# ==================================================
-# قیمت‌های خالی
-# ==================================================
-
-def get_empty_prices():
-
-    return {
-
-        "gold_18":
-            price_item("طلای ۱۸ عیار (گرم)", None, "تومان"),
-
-        "gold_24":
-            price_item("طلای ۲۴ عیار (گرم)", None, "تومان"),
-
-        "gold_abshode":
-            price_item("طلای آبشده", None, "تومان"),
-
-        "gold_mesghal":
-            price_item("مثقال طلا", None, "تومان"),
-
-        "gold_ounce":
-            price_item("اونس جهانی طلا", None, "دلار"),
-
-        "sekke_emami":
-            price_item("سکه امامی", None, "تومان"),
-
-        "sekke_nim":
-            price_item("نیم سکه", None, "تومان"),
-
-        "bitcoin":
-            price_item("بیت‌کوین", None, "دلار"),
-
-        "ethereum":
-            price_item("اتریوم", None, "دلار"),
-
-        "tether":
-            price_item("تتر", None, "تومان"),
-
-        "usd":
-            price_item("دلار آمریکا", None, "تومان"),
-
-        "eur":
-            price_item("یورو", None, "تومان"),
-
-    }
-
-
-# ==================================================
-# ساخت پیام کامل
-# ==================================================
+# ==========================================
+# ساخت پیام
+# ==========================================
 
 def format_message(prices):
 
     now = get_iran_time()
 
-
     lines = [
 
         "📊 *قیمت‌های لحظه‌ای بازار*",
-
         f"🕐 آخرین به‌روزرسانی: `{now}`",
-
         "",
-
         "━━━━━━━━━━━━━━━━━━",
-
         "🥇 *فلزات گرانبها*",
 
     ]
 
 
     for key in [
-
         "gold_18",
-
         "gold_24",
-
         "gold_abshode",
-
         "gold_mesghal",
-
         "gold_ounce",
-
     ]:
 
         p = prices[key]
 
         lines.append(
-
             f"• {p['label']}: "
-
             f"`{p['price']}` "
-
             f"{p['unit']}"
-
         )
 
 
     lines += [
-
         "",
-
         "━━━━━━━━━━━━━━━━━━",
-
         "🪙 *سکه*",
-
     ]
 
 
     for key in [
-
         "sekke_emami",
-
         "sekke_nim",
-
     ]:
 
         p = prices[key]
 
         lines.append(
-
             f"• {p['label']}: "
-
             f"`{p['price']}` "
-
             f"{p['unit']}"
-
         )
 
 
     lines += [
-
         "",
-
         "━━━━━━━━━━━━━━━━━━",
-
         "💰 *ارز دیجیتال*",
-
     ]
 
 
     for key in [
-
         "bitcoin",
-
         "ethereum",
-
         "tether",
-
     ]:
 
         p = prices[key]
 
         lines.append(
-
             f"• {p['label']}: "
-
             f"`{p['price']}` "
-
             f"{p['unit']}"
-
         )
 
 
     lines += [
-
         "",
-
         "━━━━━━━━━━━━━━━━━━",
-
         "💵 *ارزهای خارجی*",
-
     ]
 
 
     for key in [
-
         "usd",
-
         "eur",
-
     ]:
 
         p = prices[key]
 
         lines.append(
-
             f"• {p['label']}: "
-
             f"`{p['price']}` "
-
             f"{p['unit']}"
-
         )
 
 
     lines += [
-
         "",
-
         "━━━━━━━━━━━━━━━━━━",
-
         "🤖 @tala\\_arz\\_irr"
-
     ]
 
 
     return "\n".join(lines)
 
 
-# ==================================================
-# شروع
-# ==================================================
+# ==========================================
+# /start
+# ==========================================
 
 async def start(
-
     update: Update,
-
     context: ContextTypes.DEFAULT_TYPE
-
 ):
 
     keyboard = [
 
         [
-
             InlineKeyboardButton(
-
                 "📊 همه قیمت‌ها",
-
                 callback_data="prices"
-
             )
-
         ],
 
         [
-
             InlineKeyboardButton(
-
                 "🥇 طلا و سکه",
-
                 callback_data="gold"
-
             ),
 
             InlineKeyboardButton(
-
                 "💰 کریپتو",
-
                 callback_data="crypto"
-
             ),
-
         ],
 
         [
-
             InlineKeyboardButton(
-
                 "💵 ارز",
-
                 callback_data="fiat"
-
             )
-
         ],
-
     ]
 
 
     await update.message.reply_text(
-
         "سلام! 👋\n\n"
-
         "به ربات قیمت طلا و ارز خوش اومدی.\n"
-
         "از منوی زیر انتخاب کن:",
-
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        )
-
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-# ==================================================
+# ==========================================
 # دکمه‌ها
-# ==================================================
+# ==========================================
 
 async def button_handler(
-
     update: Update,
-
     context: ContextTypes.DEFAULT_TYPE
-
 ):
 
     query = update.callback_query
 
     await query.answer()
 
-
     await query.edit_message_text(
-
         "⏳ در حال دریافت قیمت‌ها..."
-
     )
-
 
     prices = fetch_all_prices()
 
 
     if query.data == "prices":
 
-        message = format_message(
-            prices
-        )
+        message = format_message(prices)
 
 
     elif query.data == "gold":
 
         keys = [
-
             "gold_18",
-
             "gold_24",
-
             "gold_abshode",
-
             "gold_mesghal",
-
             "gold_ounce",
-
             "sekke_emami",
-
             "sekke_nim",
-
         ]
 
         lines = [
-
             "🥇 *طلا و سکه*",
-
             ""
-
         ]
-
 
         for key in keys:
 
             p = prices[key]
 
             lines.append(
-
                 f"• {p['label']}: "
-
                 f"`{p['price']}` "
-
                 f"{p['unit']}"
-
             )
-
 
         message = "\n".join(lines)
 
@@ -1138,38 +842,25 @@ async def button_handler(
     elif query.data == "crypto":
 
         keys = [
-
             "bitcoin",
-
             "ethereum",
-
             "tether",
-
         ]
 
         lines = [
-
             "💰 *ارزهای دیجیتال*",
-
             ""
-
         ]
-
 
         for key in keys:
 
             p = prices[key]
 
             lines.append(
-
                 f"• {p['label']}: "
-
                 f"`{p['price']}` "
-
                 f"{p['unit']}"
-
             )
-
 
         message = "\n".join(lines)
 
@@ -1177,36 +868,24 @@ async def button_handler(
     elif query.data == "fiat":
 
         keys = [
-
             "usd",
-
             "eur",
-
         ]
 
         lines = [
-
             "💵 *ارزهای خارجی*",
-
             ""
-
         ]
-
 
         for key in keys:
 
             p = prices[key]
 
             lines.append(
-
                 f"• {p['label']}: "
-
                 f"`{p['price']}` "
-
                 f"{p['unit']}"
-
             )
-
 
         message = "\n".join(lines)
 
@@ -1217,71 +896,48 @@ async def button_handler(
 
 
     await query.edit_message_text(
-
         message,
-
         parse_mode=ParseMode.MARKDOWN
-
     )
 
 
-# ==================================================
-# دستور /price
-# ==================================================
+# ==========================================
+# /price
+# ==========================================
 
 async def price_command(
-
     update: Update,
-
     context: ContextTypes.DEFAULT_TYPE
-
 ):
 
     prices = fetch_all_prices()
 
-    message = format_message(
-        prices
-    )
+    message = format_message(prices)
 
     await update.message.reply_text(
-
         message,
-
         parse_mode=ParseMode.MARKDOWN
-
     )
 
 
-# ==================================================
+# ==========================================
 # ارسال به کانال
-# ==================================================
+# ==========================================
 
 async def send_to_channel(
-
     context: ContextTypes.DEFAULT_TYPE
-
 ):
 
     try:
 
-        logger.info(
-            "Updating channel..."
-        )
-
         prices = fetch_all_prices()
 
-        message = format_message(
-            prices
-        )
+        message = format_message(prices)
 
         await context.bot.send_message(
-
             chat_id=CHANNEL_ID,
-
             text=message,
-
             parse_mode=ParseMode.MARKDOWN
-
         )
 
         logger.info(
@@ -1291,79 +947,57 @@ async def send_to_channel(
     except Exception as error:
 
         logger.exception(
-            f"Channel error: {error}"
+            f"Channel ERROR: {error}"
         )
 
 
-# ==================================================
-# اجرای اصلی
-# ==================================================
+# ==========================================
+# اجرای ربات
+# ==========================================
 
 def main():
 
     if not BOT_TOKEN:
 
         raise ValueError(
-            "BOT_TOKEN تنظیم نشده است"
+            "BOT_TOKEN تنظیم نشده است!"
         )
 
 
     app = (
-
         Application.builder()
-
         .token(BOT_TOKEN)
-
         .build()
-
     )
 
 
     app.add_handler(
-
         CommandHandler(
-
             "start",
-
             start
-
         )
-
     )
 
 
     app.add_handler(
-
         CommandHandler(
-
             "price",
-
             price_command
-
         )
-
     )
 
 
     app.add_handler(
-
         CallbackQueryHandler(
-
             button_handler
-
         )
-
     )
 
 
     app.job_queue.run_repeating(
-
         send_to_channel,
-
         interval=UPDATE_INTERVAL,
-
         first=10
-
     )
 
 
@@ -1371,14 +1005,8 @@ def main():
         "Bot started successfully!"
     )
 
-
     app.run_polling()
 
 
-# ==================================================
-# شروع برنامه
-# ==================================================
-
 if __name__ == "__main__":
-
     main()
