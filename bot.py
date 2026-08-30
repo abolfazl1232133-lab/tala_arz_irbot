@@ -8,122 +8,75 @@ import pytz
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8864763894:AAE6eYrof1hvVFVfzZxbJXMnwl-aq_Opow0")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@tala_arz_irr")
+BRSAPI_KEY = os.environ.get("BRSAPI_KEY", "BxHwktsGdRAuqvjmJQMDGh3p2xPmqy5K")
 UPDATE_INTERVAL = 300
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 IRAN_TZ = pytz.timezone("Asia/Tehran")
 
 def get_iran_time():
     return datetime.now(IRAN_TZ).strftime("%Y/%m/%d - %H:%M")
 
+def fmt(val):
+    try:
+        return f"{int(str(val).replace(',', '')):,}"
+    except:
+        return str(val) if val else "---"
+
 def fetch_all_prices():
     prices = {}
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-    # ارزهای دیجیتال - CoinGecko
+    # طلا، ارز، سکه از BrsApi
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,tether&vs_currencies=usd"
-        r = requests.get(url, timeout=15)
+        r = requests.get(
+            f"https://Api.BrsApi.ir/Market/Gold_Currency.php?key={BRSAPI_KEY}",
+            headers=headers, timeout=15
+        )
         data = r.json()
-        prices["bitcoin"] = {"label": "بیت‌کوین", "price": f"{data['bitcoin']['usd']:,.0f}", "unit": "دلار"}
-        prices["tether"] = {"label": "تتر", "price": f"{data['tether']['usd']:,.2f}", "unit": "دلار"}
-        prices["ethereum"] = {"label": "اتریوم", "price": f"{data['ethereum']['usd']:,.0f}", "unit": "دلار"}
+        logger.info(f"BrsApi Gold_Currency keys: {list(data.keys())[:10]}")
+
+        # طلا
+        prices["gold_18"] = {"label": "طلای ۱۸ عیار (گرم)", "price": fmt(data.get("geram18") or data.get("gold_18")), "unit": "تومان"}
+        prices["gold_24"] = {"label": "طلای ۲۴ عیار (گرم)", "price": fmt(data.get("geram24") or data.get("gold_24")), "unit": "تومان"}
+        prices["gold_mesghal"] = {"label": "مثقال طلا", "price": fmt(data.get("mesghal") or data.get("gold_mesghal")), "unit": "تومان"}
+        prices["gold_abshode"] = {"label": "طلای آبشده", "price": fmt(data.get("abshodeh") or data.get("gold_abshode") or data.get("abshode")), "unit": "تومان"}
+        prices["gold_ounce"] = {"label": "اونس جهانی طلا", "price": fmt(data.get("ons") or data.get("gold_ounce") or data.get("ounce")), "unit": "دلار"}
+
+        # ارز
+        prices["usd"] = {"label": "دلار آمریکا", "price": fmt(data.get("usd") or data.get("dollar")), "unit": "تومان"}
+        prices["eur"] = {"label": "یورو", "price": fmt(data.get("eur") or data.get("euro")), "unit": "تومان"}
+
+        # سکه
+        prices["sekke_emami"] = {"label": "سکه امامی", "price": fmt(data.get("sekee_emami") or data.get("coin_emami")), "unit": "تومان"}
+        prices["sekke_nim"] = {"label": "نیم سکه", "price": fmt(data.get("nim") or data.get("coin_nim")), "unit": "تومان"}
+
     except Exception as e:
-        logger.error(f"CoinGecko error: {e}")
+        logger.error(f"BrsApi Gold error: {e}")
+        for k in ["gold_18","gold_24","gold_mesghal","gold_abshode","gold_ounce","usd","eur","sekke_emami","sekke_nim"]:
+            prices[k] = {"label": k, "price": "---", "unit": ""}
+
+    # کریپتو از BrsApi
+    try:
+        r = requests.get(
+            f"https://Api.BrsApi.ir/Market/Cryptocurrency.php?key={BRSAPI_KEY}",
+            headers=headers, timeout=15
+        )
+        data = r.json()
+        logger.info(f"BrsApi Crypto keys: {list(data.keys())[:10]}")
+
+        prices["bitcoin"] = {"label": "بیت‌کوین", "price": fmt(data.get("bitcoin") or data.get("btc")), "unit": "دلار"}
+        prices["ethereum"] = {"label": "اتریوم", "price": fmt(data.get("ethereum") or data.get("eth")), "unit": "دلار"}
+        prices["tether"] = {"label": "تتر", "price": fmt(data.get("tether") or data.get("usdt")), "unit": "تومان"}
+
+    except Exception as e:
+        logger.error(f"BrsApi Crypto error: {e}")
         prices["bitcoin"] = {"label": "بیت‌کوین", "price": "---", "unit": "دلار"}
-        prices["tether"] = {"label": "تتر", "price": "---", "unit": "دلار"}
         prices["ethereum"] = {"label": "اتریوم", "price": "---", "unit": "دلار"}
-
-    # اونس طلا و نقره - از Metals-API رایگان
-    try:
-        r = requests.get("https://api.metals.live/v1/spot/gold", timeout=15)
-        data = r.json()
-        gold_price = data[0].get("gold") if isinstance(data, list) else data.get("gold")
-        if gold_price:
-            prices["gold_ounce"] = {"label": "اونس جهانی طلا", "price": f"{float(gold_price):,.2f}", "unit": "دلار"}
-        else:
-            prices["gold_ounce"] = {"label": "اونس جهانی طلا", "price": "---", "unit": "دلار"}
-    except Exception as e:
-        logger.error(f"Gold metals.live error: {e}")
-        # fallback
-        try:
-            r = requests.get("https://api.metals.live/v1/spot", timeout=15)
-            data = r.json()
-            for item in data:
-                if isinstance(item, dict) and "gold" in item:
-                    prices["gold_ounce"] = {"label": "اونس جهانی طلا", "price": f"{float(item['gold']):,.2f}", "unit": "دلار"}
-                    break
-        except:
-            prices["gold_ounce"] = {"label": "اونس جهانی طلا", "price": "---", "unit": "دلار"}
-
-    try:
-        r = requests.get("https://api.metals.live/v1/spot/silver", timeout=15)
-        data = r.json()
-        silver_price = data[0].get("silver") if isinstance(data, list) else data.get("silver")
-        if silver_price:
-            prices["silver_ounce"] = {"label": "اونس نقره", "price": f"{float(silver_price):,.2f}", "unit": "دلار"}
-        else:
-            prices["silver_ounce"] = {"label": "اونس نقره", "price": "---", "unit": "دلار"}
-    except Exception as e:
-        logger.error(f"Silver error: {e}")
-        prices["silver_ounce"] = {"label": "اونس نقره", "price": "---", "unit": "دلار"}
-
-    # دلار و یورو به تومان - از navasan.tech (قیمت بازار آزاد ایران)
-    try:
-        r = requests.get("https://api.navasan.tech/latest/?api_key=free&item=usd,eur", timeout=15)
-        data = r.json()
-        usd = data.get("usd", {}).get("value")
-        eur = data.get("eur", {}).get("value")
-        if usd:
-            prices["usd"] = {"label": "دلار آمریکا", "price": f"{int(usd):,}", "unit": "تومان"}
-        else:
-            prices["usd"] = {"label": "دلار آمریکا", "price": "---", "unit": "تومان"}
-        if eur:
-            prices["eur"] = {"label": "یورو", "price": f"{int(eur):,}", "unit": "تومان"}
-        else:
-            prices["eur"] = {"label": "یورو", "price": "---", "unit": "تومان"}
-    except Exception as e:
-        logger.error(f"Navasan error: {e}")
-        # fallback به open.er-api
-        try:
-            r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=15)
-            data = r.json()
-            rates = data.get("rates", {})
-            irr_rate = rates.get("IRR", 0)
-            eur_rate = rates.get("EUR", 0)
-            if irr_rate:
-                toman = irr_rate / 10
-                prices["usd"] = {"label": "دلار آمریکا", "price": f"{toman:,.0f}", "unit": "تومان"}
-            if eur_rate and irr_rate:
-                eur_toman = (irr_rate / eur_rate) / 10
-                prices["eur"] = {"label": "یورو", "price": f"{eur_toman:,.0f}", "unit": "تومان"}
-        except:
-            prices["usd"] = {"label": "دلار آمریکا", "price": "---", "unit": "تومان"}
-            prices["eur"] = {"label": "یورو", "price": "---", "unit": "تومان"}
-
-    # محاسبه طلای ایرانی از اونس × دلار
-    try:
-        gold_str = prices.get("gold_ounce", {}).get("price", "---")
-        usd_str = prices.get("usd", {}).get("price", "---")
-        if gold_str != "---" and usd_str != "---":
-            gold_usd = float(gold_str.replace(",", ""))
-            usd_toman = float(usd_str.replace(",", ""))
-            gram_toman = (gold_usd * usd_toman) / 31.1035
-            gold_18 = gram_toman * 0.75
-            gold_24 = gram_toman
-            prices["gold_18"] = {"label": "طلای ۱۸ عیار (گرم)", "price": f"{gold_18:,.0f}", "unit": "تومان"}
-            prices["gold_24"] = {"label": "طلای ۲۴ عیار (گرم)", "price": f"{gold_24:,.0f}", "unit": "تومان"}
-        else:
-            prices["gold_18"] = {"label": "طلای ۱۸ عیار (گرم)", "price": "---", "unit": "تومان"}
-            prices["gold_24"] = {"label": "طلای ۲۴ عیار (گرم)", "price": "---", "unit": "تومان"}
-    except Exception as e:
-        logger.error(f"Gold calc error: {e}")
-        prices["gold_18"] = {"label": "طلای ۱۸ عیار (گرم)", "price": "---", "unit": "تومان"}
-        prices["gold_24"] = {"label": "طلای ۲۴ عیار (گرم)", "price": "---", "unit": "تومان"}
+        prices["tether"] = {"label": "تتر", "price": "---", "unit": "تومان"}
 
     return prices
-
 
 def format_message(prices):
     now = get_iran_time()
@@ -134,7 +87,12 @@ def format_message(prices):
         "━━━━━━━━━━━━━━━━━━",
         "🥇 *فلزات گرانبها*",
     ]
-    for k in ["gold_18", "gold_24", "gold_ounce", "silver_ounce"]:
+    for k in ["gold_18", "gold_24", "gold_abshode", "gold_mesghal", "gold_ounce"]:
+        p = prices.get(k, {})
+        lines.append(f"• {p.get('label','')}: `{p.get('price','---')}` {p.get('unit','')}")
+
+    lines += ["", "━━━━━━━━━━━━━━━━━━", "🪙 *سکه*"]
+    for k in ["sekke_emami", "sekke_nim"]:
         p = prices.get(k, {})
         lines.append(f"• {p.get('label','')}: `{p.get('price','---')}` {p.get('unit','')}")
 
@@ -151,11 +109,10 @@ def format_message(prices):
     lines += ["", "━━━━━━━━━━━━━━━━━━", "🤖 @tala\\_arz\\_irr"]
     return "\n".join(lines)
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 همه قیمت‌ها", callback_data="prices")],
-        [InlineKeyboardButton("🥇 طلا و نقره", callback_data="gold"),
+        [InlineKeyboardButton("🥇 طلا و سکه", callback_data="gold"),
          InlineKeyboardButton("💰 کریپتو", callback_data="crypto")],
         [InlineKeyboardButton("💵 ارز", callback_data="fiat")],
     ]
@@ -173,8 +130,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "prices":
         msg = format_message(prices)
     elif query.data == "gold":
-        lines = ["🥇 *فلزات گرانبها*\n"]
-        for k in ["gold_18", "gold_24", "gold_ounce", "silver_ounce"]:
+        lines = ["🥇 *طلا و سکه*\n"]
+        for k in ["gold_18","gold_24","gold_abshode","gold_mesghal","gold_ounce","sekke_emami","sekke_nim"]:
             p = prices.get(k, {})
             lines.append(f"• {p.get('label','')}: `{p.get('price','---')}` {p.get('unit','')}")
         msg = "\n".join(lines)
