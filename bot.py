@@ -607,10 +607,9 @@ def fetch_prices():
             10
         ),
 
-        "brent": (
-            "/profile/brent",
-            1
-        ),
+        "brent": ("/profile/energy-brent-oil", 1
+      ),
+        
     }
 
     for key, source in sources.items():
