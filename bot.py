@@ -2,17 +2,13 @@ import os
 import re
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, time
 
 import requests
 import pytz
 from bs4 import BeautifulSoup
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -26,54 +22,34 @@ from telegram.ext import (
 # ============================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = os.environ.get(
-    "CHANNEL_ID",
-    "@tala_arz_irr"
-)
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@tala_arz_irr")
+DATABASE_PATH = os.environ.get("DATABASE_PATH", "market.db")
 
-DATABASE_PATH = os.environ.get(
-    "DATABASE_PATH",
-    "market.db"
-)
-
+IRAN_TZ = pytz.timezone("Asia/Tehran")
 TGJU = "https://www.tgju.org"
 
-IRAN_TZ = pytz.timezone(
-    "Asia/Tehran"
-)
-
-NORMAL_INTERVAL = 300      # 5 minutes
-FRIDAY_INTERVAL = 900      # 15 minutes
+NORMAL_INTERVAL = 300       # 5 دقیقه
+FRIDAY_INTERVAL = 1800      # 30 دقیقه
+HOLIDAY_INTERVAL = 3600     # 1 ساعت
 
 MARKET_START_HOUR = 7
 MARKET_END_HOUR = 23
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 "
-        "(Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0 Safari/537.36"
     ),
-    "Accept-Language": (
-        "fa-IR,fa;q=0.9,en;q=0.8"
-    ),
+    "Accept-Language": "fa-IR,fa;q=0.9,en;q=0.8",
 }
 
 logging.basicConfig(
     level=logging.INFO,
-    format=(
-        "%(asctime)s - "
-        "%(name)s - "
-        "%(levelname)s - "
-        "%(message)s"
-    ),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
-logger = logging.getLogger(
-    __name__
-)
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -81,15 +57,91 @@ logger = logging.getLogger(
 # ============================================================
 
 def iran_now():
-    return datetime.now(
-        IRAN_TZ
-    )
+    return datetime.now(IRAN_TZ)
 
 
-def unix_now():
-    return int(
-        datetime.now().timestamp()
-    )
+def now_ts():
+    return int(datetime.now().timestamp())
+
+
+# ============================================================
+# OFFICIAL IRAN HOLIDAYS
+# ============================================================
+#
+# تعطیلات رسمی را می‌توان در این مجموعه وارد کرد.
+#
+# فرمت:
+# YYYY-MM-DD
+#
+# برای اینکه ربات به‌صورت دائمی قابل استفاده باشد،
+# فقط تاریخ‌های رسمی هر سال را در این قسمت اضافه کن.
+#
+# روزهای جمعه جداگانه مدیریت می‌شوند.
+# ============================================================
+
+OFFICIAL_HOLIDAYS = {
+    # 1405
+    "2026-03-21",
+    "2026-03-22",
+    "2026-03-23",
+    "2026-03-24",
+    "2026-03-25",
+    "2026-03-26",
+    "2026-04-01",
+    "2026-04-02",
+    "2026-04-03",
+    "2026-06-03",
+    "2026-06-04",
+    "2026-06-05",
+    "2026-06-26",
+    "2026-06-27",
+    "2026-07-05",
+    "2026-07-06",
+    "2026-07-26",
+    "2026-07-27",
+    "2026-08-05",
+    "2026-08-06",
+    "2026-08-14",
+    "2026-08-15",
+}
+
+
+def is_official_holiday():
+    today = iran_now().strftime("%Y-%m-%d")
+    return today in OFFICIAL_HOLIDAYS
+
+
+def market_is_open():
+    """
+    ساعت فعالیت:
+    07:00 تا 23:00
+
+    خارج از این ساعات هیچ آپدیت خودکاری
+    برای کانال انجام نمی‌شود.
+    """
+
+    now = iran_now()
+
+    if not (
+        MARKET_START_HOUR
+        <= now.hour
+        < MARKET_END_HOUR
+    ):
+        return False
+
+    return True
+
+
+def current_update_interval():
+
+    if is_official_holiday():
+        return HOLIDAY_INTERVAL
+
+    # Friday = 4
+    if iran_now().weekday() == 4:
+        return FRIDAY_INTERVAL
+
+    return NORMAL_INTERVAL
 
 
 # ============================================================
@@ -100,7 +152,7 @@ def db():
 
     conn = sqlite3.connect(
         DATABASE_PATH,
-        timeout=30
+        timeout=20
     )
 
     conn.row_factory = sqlite3.Row
@@ -122,8 +174,7 @@ def init_db():
         """)
 
         c.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_prices_key_ts
+            CREATE INDEX IF NOT EXISTS idx_prices_key_ts
             ON prices(key, ts)
         """)
 
@@ -147,30 +198,23 @@ def init_db():
         """)
 
         c.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_alerts_active
+            CREATE INDEX IF NOT EXISTS idx_alerts_active
             ON alerts(active)
         """)
 
 
-def set_setting(
-    key,
-    value
-):
+def set_setting(key, value):
 
     with db() as c:
 
         c.execute(
             """
-            INSERT INTO settings(key, value)
-            VALUES(?, ?)
+            INSERT INTO settings(key,value)
+            VALUES(?,?)
             ON CONFLICT(key)
             DO UPDATE SET value=excluded.value
             """,
-            (
-                key,
-                str(value)
-            )
+            (key, str(value))
         )
 
 
@@ -187,33 +231,27 @@ def get_setting(key):
             (key,)
         ).fetchone()
 
-    if row:
-        return row["value"]
+    return row["value"] if row else None
 
-    return None
 
+# ============================================================
+# PRICE HISTORY
+# ============================================================
 
 def save_snapshot(prices):
 
-    ts = unix_now()
+    ts = now_ts()
 
     with db() as c:
 
         for key, value in prices.items():
 
-            if (
-                value is not None
-                and value > 0
-            ):
+            if value is not None and value > 0:
 
                 c.execute(
                     """
-                    INSERT INTO prices(
-                        ts,
-                        key,
-                        price
-                    )
-                    VALUES(?, ?, ?)
+                    INSERT INTO prices(ts,key,price)
+                    VALUES(?,?,?)
                     """,
                     (
                         ts,
@@ -222,16 +260,13 @@ def save_snapshot(prices):
                     )
                 )
 
-        # نگهداری 8 روز تاریخچه
+        # حدود 8 روز تاریخچه
         cutoff = ts - (
             8 * 86400
         )
 
         c.execute(
-            """
-            DELETE FROM prices
-            WHERE ts < ?
-            """,
+            "DELETE FROM prices WHERE ts < ?",
             (cutoff,)
         )
 
@@ -248,7 +283,7 @@ def price_at_or_before(
             SELECT price
             FROM prices
             WHERE key=?
-            AND ts <= ?
+            AND ts<=?
             ORDER BY ts DESC
             LIMIT 1
             """,
@@ -259,9 +294,7 @@ def price_at_or_before(
         ).fetchone()
 
     if row:
-        return float(
-            row["price"]
-        )
+        return float(row["price"])
 
     return None
 
@@ -298,51 +331,45 @@ def fmt_num(
     if value is None:
         return "---"
 
-    return f"{value:,.{decimals}f}"
+    if decimals:
+        return f"{value:,.{decimals}f}"
+
+    return f"{value:,.0f}"
 
 
-def extract_first_number(
-    text
-):
+def extract_first_number(text):
 
     if not text:
         return None
 
     text = str(text)
 
-    text = text.replace(
-        ",",
-        ""
-    )
-
-    text = text.replace(
-        "٬",
-        ""
-    )
+    text = text.replace(",", "")
+    text = text.replace("٬", "")
 
     trans = str.maketrans(
         "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
         "01234567890123456789"
     )
 
-    text = text.translate(
-        trans
-    )
+    text = text.translate(trans)
 
     match = re.search(
         r"\d+(?:\.\d+)?",
         text
     )
 
-    if not match:
-        return None
+    if match:
 
-    try:
-        return float(
-            match.group()
-        )
-    except Exception:
-        return None
+        try:
+            return float(
+                match.group()
+            )
+
+        except Exception:
+            return None
+
+    return None
 
 
 # ============================================================
@@ -366,9 +393,7 @@ def fetch_html(url):
 # TGJU PROFILE
 # ============================================================
 
-def profile_current(
-    path
-):
+def profile_current(path):
 
     html = fetch_html(
         TGJU + path
@@ -386,11 +411,9 @@ def profile_current(
 
     patterns = [
 
+        r"نرخ فعلی\s*[:：]+\s*([\d,٬.]+)",
+
         r"نرخ فعلی\s*[:：]?\s*([\d,٬.]+)",
-
-        r"قیمت فعلی\s*[:：]?\s*([\d,٬.]+)",
-
-        r"نرخ فعلی:\s*([\d,٬.]+)",
 
     ]
 
@@ -407,27 +430,8 @@ def profile_current(
                 match.group(1)
             )
 
-            if (
-                value is not None
-                and value > 0
-            ):
+            if value is not None:
                 return value
-
-    # fallback:
-    # پیدا کردن عبارت نرخ فعلی در HTML/text
-    match = re.search(
-        r"نرخ فعلی.{0,80}?([\d,٬.]+)",
-        text
-    )
-
-    if match:
-
-        value = extract_first_number(
-            match.group(1)
-        )
-
-        if value:
-            return value
 
     return None
 
@@ -463,6 +467,88 @@ def safe_profile(
 
 
 # ============================================================
+# TABLE PRICE
+# ============================================================
+
+def table_price(
+    html,
+    names
+):
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    normalized_names = []
+
+    for name in names:
+
+        name = name.replace(
+            "ي",
+            "ی"
+        )
+
+        name = name.replace(
+            "ك",
+            "ک"
+        )
+
+        normalized_names.append(
+            name.lower()
+        )
+
+    for row in soup.find_all("tr"):
+
+        cells = row.find_all(
+            ["td", "th"]
+        )
+
+        if len(cells) < 2:
+            continue
+
+        label = cells[0].get_text(
+            " ",
+            strip=True
+        )
+
+        normalized = label.replace(
+            "ي",
+            "ی"
+        )
+
+        normalized = normalized.replace(
+            "ك",
+            "ک"
+        )
+
+        normalized = normalized.lower()
+
+        if any(
+            name == normalized
+            or name in normalized
+            for name in normalized_names
+        ):
+
+            for cell in cells[1:]:
+
+                value = extract_first_number(
+                    cell.get_text(
+                        " ",
+                        strip=True
+                    )
+                )
+
+                if (
+                    value is not None
+                    and value > 0
+                ):
+                    return value
+
+    return None
+
+
+# ============================================================
 # MARKET DATA
 # ============================================================
 
@@ -470,9 +556,9 @@ def fetch_prices():
 
     prices = {}
 
-    # ========================================================
-    # GOLD / COINS / FX / OIL
-    # ========================================================
+    # --------------------------------------------------------
+    # GOLD / COINS / CURRENCY / OIL
+    # --------------------------------------------------------
 
     sources = {
 
@@ -521,17 +607,15 @@ def fetch_prices():
             10
         ),
 
-        # مسیر درست پروفایل نفت برنت
         "brent": (
-            "/profile/energy-brent-oil",
+            "/profile/brent",
             1
         ),
     }
 
-    for key, (
-        path,
-        divisor
-    ) in sources.items():
+    for key, source in sources.items():
+
+        path, divisor = source
 
         raw = safe_profile(
             path,
@@ -548,11 +632,9 @@ def fetch_prices():
 
             prices[key] = None
 
-    # ========================================================
-    # MOLTEN GOLD
-    # ========================================================
-
-    prices["abshode"] = None
+    # --------------------------------------------------------
+    # MELTED GOLD
+    # --------------------------------------------------------
 
     try:
 
@@ -560,68 +642,23 @@ def fetch_prices():
             TGJU + "/gold-chart"
         )
 
-        soup = BeautifulSoup(
+        value = table_price(
             html,
-            "html.parser"
+            [
+                "آبشده نقدی",
+                "آبشده نقدى"
+            ]
         )
 
-        wanted = [
-            "آبشده نقدی",
-            "آبشده نقدى",
-            "آبشده"
-        ]
+        if value is not None:
 
-        for row in soup.find_all(
-            "tr"
-        ):
-
-            cells = row.find_all(
-                ["td", "th"]
+            prices["abshode"] = (
+                value / 10
             )
 
-            if len(cells) < 2:
-                continue
+        else:
 
-            row_text = row.get_text(
-                " ",
-                strip=True
-            )
-
-            normalized = (
-                row_text
-                .replace("ي", "ی")
-                .replace("ك", "ک")
-            )
-
-            if any(
-                name in normalized
-                for name in wanted
-            ):
-
-                for cell in cells[1:]:
-
-                    value = (
-                        extract_first_number(
-                            cell.get_text(
-                                " ",
-                                strip=True
-                            )
-                        )
-                    )
-
-                    if (
-                        value is not None
-                        and value > 0
-                    ):
-
-                        prices["abshode"] = (
-                            value / 10
-                        )
-
-                        break
-
-            if prices["abshode"]:
-                break
+            prices["abshode"] = None
 
     except Exception as e:
 
@@ -630,69 +667,124 @@ def fetch_prices():
             e
         )
 
-    # ========================================================
-    # CRYPTO
-    # ========================================================
+        prices["abshode"] = None
 
-    for key in (
+    # --------------------------------------------------------
+    # CRYPTO
+    # --------------------------------------------------------
+
+    crypto_keys = (
         "btc",
         "eth",
         "sol",
         "bnb",
-        "xrp"
-    ):
+        "xrp",
+        "usdt"
+    )
+
+    for key in crypto_keys:
         prices[key] = None
 
-    crypto_sources = {
+    try:
 
-        "btc": (
-            "/profile/crypto-bitcoin",
-            1
-        ),
-
-        "eth": (
-            "/profile/crypto-ethereum",
-            1
-        ),
-
-        "sol": (
-            "/profile/crypto-solana",
-            1
-        ),
-
-        "bnb": (
-            "/profile/crypto-bnb",
-            1
-        ),
-
-        "xrp": (
-            "/profile/crypto-xrp",
-            1
-        ),
-    }
-
-    for key, (
-        path,
-        divisor
-    ) in crypto_sources.items():
-
-        raw = safe_profile(
-            path,
-            key
+        html = fetch_html(
+            TGJU + "/crypto"
         )
 
-        if raw is not None:
+        soup = BeautifulSoup(
+            html,
+            "html.parser"
+        )
 
-            prices[key] = (
-                raw / divisor
-            )
+        crypto_map = {
 
-    # ========================================================
+            "btc": [
+                "بیت کوین",
+                "bitcoin"
+            ],
+
+            "eth": [
+                "اتریوم",
+                "ethereum"
+            ],
+
+            "sol": [
+                "سولانا",
+                "solana"
+            ],
+
+            "bnb": [
+                "بایننس کوین",
+                "bnb"
+            ],
+
+            "xrp": [
+                "ریپل",
+                "ripple"
+            ],
+
+            "usdt": [
+                "تتر",
+                "tether"
+            ],
+        }
+
+        for key, names in crypto_map.items():
+
+            found = None
+
+            for row in soup.find_all("tr"):
+
+                cells = row.find_all(
+                    ["td", "th"]
+                )
+
+                if len(cells) < 2:
+                    continue
+
+                row_text = row.get_text(
+                    " ",
+                    strip=True
+                ).lower()
+
+                if any(
+                    name.lower() in row_text
+                    for name in names
+                ):
+
+                    for cell in cells[1:]:
+
+                        value = extract_first_number(
+                            cell.get_text(
+                                " ",
+                                strip=True
+                            )
+                        )
+
+                        if (
+                            value is not None
+                            and value > 0
+                        ):
+
+                            found = value
+                            break
+
+                if found is not None:
+                    break
+
+            prices[key] = found
+
+    except Exception as e:
+
+        logger.error(
+            "Crypto failed: %s",
+            e
+        )
+
+    # --------------------------------------------------------
     # USDT TOMAN
-    # ========================================================
+    # --------------------------------------------------------
 
-    # اگر نرخ تتر تومانی مستقیم در TGJU
-    # قابل استخراج نبود، دلار بازار را استفاده می‌کنیم.
     prices["usdt_toman"] = prices.get(
         "usd"
     )
@@ -811,93 +903,85 @@ NAMES = {
 
 
 # ============================================================
-# PERCENT
+# PERCENT DISPLAY
 # ============================================================
 
-def arrow_pct(
-    value
-):
+def arrow_pct(value):
 
     if value is None:
         return "▫️ ---"
 
     if value > 0:
-        return (
-            f"📈 +{value:.2f}%"
-        )
+        return f"📈 +{value:.2f}%"
 
     if value < 0:
-        return (
-            f"📉 {value:.2f}%"
-        )
+        return f"📉 {value:.2f}%"
 
     return "➖ 0.00%"
 
 
 # ============================================================
-# LINE
+# LIVE LINE
 # ============================================================
 
 def line_for(
     key,
     prices,
     old5,
-    old60
+    old60,
+    show_changes=True
 ):
 
-    label, unit, decimals = (
-        NAMES[key]
-    )
+    label, unit, decimals = NAMES[key]
 
-    value = prices.get(
-        key
-    )
+    value = prices.get(key)
 
     if value is None:
 
         return (
-            f"• {label}: --- {unit}"
+            f"• {label}: "
+            f"`---` {unit}"
         )
 
-    result = (
+    line = (
         f"• {label}: "
         f"`{fmt_num(value, decimals)}` "
         f"{unit}"
     )
 
-    change5 = pct_change(
-        value,
-        old5
-    )
+    if show_changes:
 
-    change60 = pct_change(
-        value,
-        old60
-    )
+        change5 = pct_change(
+            value,
+            old5
+        )
 
-    result += (
-        f"\n  ├ ۵ دقیقه: "
-        f"{arrow_pct(change5)}"
-    )
+        change60 = pct_change(
+            value,
+            old60
+        )
 
-    result += (
-        f"\n  └ ۱ ساعت: "
-        f"{arrow_pct(change60)}"
-    )
+        line += (
+            f"\n  ├ ۵ دقیقه: "
+            f"{arrow_pct(change5)}"
+        )
 
-    return result
+        line += (
+            f"\n  └ ۱ ساعت: "
+            f"{arrow_pct(change60)}"
+        )
+
+    return line
 
 
 # ============================================================
 # LIVE MESSAGE
 # ============================================================
 
-def live_message(
-    prices
-):
+def live_message(prices):
 
     now = iran_now()
-    ts = unix_now()
+    ts = now_ts()
 
     lines = [
 
@@ -1053,27 +1137,30 @@ def live_message(
         "🤖 @tala\\_arz\\_irr"
     ]
 
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 # ============================================================
 # HOURLY SUMMARY
 # ============================================================
 
-def hourly_summary(
-    prices
-):
+def hourly_summary(prices):
 
-    ts = unix_now()
     now = iran_now()
+
+    # نقطه مرجع:
+    # یک ساعت قبل از همین لحظه
+    target_ts = now_ts() - 3600
 
     lines = [
 
+        "📌 *جمع‌بندی یک ساعت گذشته بازار*",
+
         (
-            f"📌 *جمع‌بندی بازار | "
-            f"{now.strftime('%Y/%m/%d - %H:%M')}*"
+            f"🕐 "
+            f"{(now - timedelta(hours=1)).strftime('%H:%M')}"
+            f" تا "
+            f"{now.strftime('%H:%M')}"
         ),
 
         "",
@@ -1082,7 +1169,7 @@ def hourly_summary(
     groups = [
 
         (
-            "🥇 *طلا و سکه*",
+            "🥇 طلا و سکه",
             (
                 "gold_18",
                 "gold_24",
@@ -1094,7 +1181,7 @@ def hourly_summary(
         ),
 
         (
-            "💵 *ارز*",
+            "💵 ارز",
             (
                 "usd",
                 "eur",
@@ -1103,7 +1190,7 @@ def hourly_summary(
         ),
 
         (
-            "💰 *ارز دیجیتال*",
+            "💰 کریپتو",
             (
                 "btc",
                 "eth",
@@ -1115,43 +1202,41 @@ def hourly_summary(
         ),
 
         (
-            "🛢️ *انرژی*",
+            "🛢️ انرژی",
             (
                 "brent",
             )
         ),
     ]
 
-    for title, keys in groups:
+    for title, group in groups:
 
-        lines.append(title)
+        lines.append(
+            f"*{title}*"
+        )
 
-        for key in keys:
+        for key in group:
 
-            label, unit, decimals = (
-                NAMES[key]
-            )
+            label, unit, decimals = NAMES[key]
 
-            value = prices.get(
-                key
-            )
-
-            if value is None:
-                continue
+            current = prices.get(key)
 
             old = price_at_or_before(
                 key,
-                ts - 3600
+                target_ts
             )
 
+            if current is None:
+                continue
+
             change = pct_change(
-                value,
+                current,
                 old
             )
 
             lines.append(
                 f"• {label}: "
-                f"`{fmt_num(value, decimals)}` "
+                f"`{fmt_num(current, decimals)}` "
                 f"{unit} "
                 f"{arrow_pct(change)}"
             )
@@ -1161,57 +1246,22 @@ def hourly_summary(
     lines += [
 
         "━━━━━━━━━━━━━━━━━━",
+
         "🤖 @tala\\_arz\\_irr"
     ]
 
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 # ============================================================
 # DAILY SUMMARY
 # ============================================================
 
-def daily_summary(
-    prices
-):
-
-    ts = unix_now()
+def daily_summary(prices):
 
     now = iran_now()
 
-    candidates = []
-
-    for key in NAMES:
-
-        current = prices.get(
-            key
-        )
-
-        old = price_at_or_before(
-            key,
-            ts - 86400
-        )
-
-        change = pct_change(
-            current,
-            old
-        )
-
-        if change is not None:
-
-            candidates.append(
-                (
-                    key,
-                    change
-                )
-            )
-
-    candidates.sort(
-        key=lambda x: x[1],
-        reverse=True
-    )
+    target_ts = now_ts() - 86400
 
     lines = [
 
@@ -1222,6 +1272,43 @@ def daily_summary(
 
         "",
     ]
+
+    candidates = []
+
+    for key in NAMES:
+
+        label, unit, decimals = NAMES[key]
+
+        value = prices.get(key)
+
+        old = price_at_or_before(
+            key,
+            target_ts
+        )
+
+        if (
+            value is not None
+            and old is not None
+        ):
+
+            change = pct_change(
+                value,
+                old
+            )
+
+            if change is not None:
+
+                candidates.append(
+                    (
+                        key,
+                        change
+                    )
+                )
+
+    candidates.sort(
+        key=lambda x: x[1],
+        reverse=True
+    )
 
     if candidates:
 
@@ -1259,44 +1346,10 @@ def daily_summary(
     lines += [
 
         "",
-        "━━━━━━━━━━━━━━━━━━",
         "🤖 @tala\\_arz\\_irr"
     ]
 
-    return "\n".join(
-        lines
-    )
-
-
-# ============================================================
-# MARKET SCHEDULE
-# ============================================================
-
-def market_is_open():
-
-    now = iran_now()
-
-    return (
-        MARKET_START_HOUR
-        <= now.hour
-        < MARKET_END_HOUR
-    )
-
-
-def is_friday():
-
-    return (
-        iran_now().weekday()
-        == 4
-    )
-
-
-def current_update_interval():
-
-    if is_friday():
-        return FRIDAY_INTERVAL
-
-    return NORMAL_INTERVAL
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -1323,9 +1376,6 @@ KEY_ALIASES = {
     "xrp": "xrp",
 
     "تتر": "usdt_toman",
-
-    "نفت": "brent",
-    "برنت": "brent",
 }
 
 
@@ -1341,9 +1391,7 @@ def parse_alert(text):
         ""
     )
 
-    direction_word = (
-        parts[2].lower()
-    )
+    direction_word = parts[2].lower()
 
     try:
 
@@ -1391,8 +1439,8 @@ def parse_alert(text):
 
 
 async def alert_command(
-    update,
-    context
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
     parsed = parse_alert(
@@ -1404,15 +1452,16 @@ async def alert_command(
         await update.message.reply_text(
             "فرمت درست:\n\n"
             "/alert طلا بالای 22000000\n"
-            "/alert دلار زیر 205000\n"
-            "/alert بیتکوین بالای 80000"
+            "/alert دلار زیر 205000\n\n"
+            "دارایی‌ها:\n"
+            "طلا، دلار، یورو، پوند، "
+            "بیت‌کوین، اتریوم، سولانا، "
+            "BNB، XRP و تتر"
         )
 
         return
 
-    key, direction, target = (
-        parsed
-    )
+    key, direction, target = parsed
 
     with db() as c:
 
@@ -1432,11 +1481,11 @@ async def alert_command(
                 key,
                 direction,
                 target,
-                unix_now()
+                now_ts()
             )
         )
 
-    word = (
+    direction_text = (
         "بالاتر از"
         if direction == "above"
         else
@@ -1447,7 +1496,7 @@ async def alert_command(
 
         f"🔔 هشدار ثبت شد.\n\n"
         f"{NAMES[key][0]} "
-        f"{word} "
+        f"{direction_text} "
         f"`{fmt_num(target, NAMES[key][2])}`",
 
         parse_mode=ParseMode.MARKDOWN
@@ -1455,15 +1504,19 @@ async def alert_command(
 
 
 async def alerts_command(
-    update,
-    context
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
     with db() as c:
 
         rows = c.execute(
             """
-            SELECT id,key,direction,target
+            SELECT
+                id,
+                key,
+                direction,
+                target
             FROM alerts
             WHERE user_id=?
             AND active=1
@@ -1483,25 +1536,27 @@ async def alerts_command(
         return
 
     lines = [
+
         "🔔 *هشدارهای فعال:*",
-        ""
+        "",
     ]
 
     for row in rows:
 
         word = (
             "بالای"
-            if row["direction"]
-            == "above"
+            if row["direction"] == "above"
             else
             "زیر"
         )
 
         lines.append(
+
             f"#{row['id']} • "
             f"{NAMES[row['key']][0]} "
             f"{word} "
             f"`{fmt_num(row['target'], NAMES[row['key']][2])}`"
+
         )
 
     await update.message.reply_text(
@@ -1511,8 +1566,8 @@ async def alerts_command(
 
 
 async def cancel_alert_command(
-    update,
-    context
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
     parts = (
@@ -1551,13 +1606,12 @@ async def cancel_alert_command(
         )
 
     await update.message.reply_text(
-        "✅ هشدار غیرفعال شد."
+        "✅ اگر هشدار متعلق به شما بود، "
+        "غیرفعال شد."
     )
 
 
-async def check_alerts(
-    context
-):
+async def check_alerts(context):
 
     prices = context.application.bot_data.get(
         "latest_prices",
@@ -1597,18 +1651,19 @@ async def check_alerts(
                     value >= row["target"]
                 )
 
-                word = "به بالای"
-
             else:
 
                 hit = (
                     value <= row["target"]
                 )
 
-                word = "به زیر"
-
             if not hit:
                 continue
+
+            if row["direction"] == "above":
+                word = "به بالای"
+            else:
+                word = "به زیر"
 
             try:
 
@@ -1617,14 +1672,18 @@ async def check_alerts(
                     chat_id=row["user_id"],
 
                     text=(
+
                         "🔔 *هشدار قیمت*\n\n"
+
                         f"{NAMES[row['key']][0]} "
                         f"{word} "
                         f"`{fmt_num(row['target'], NAMES[row['key']][2])}` "
                         "رسید.\n"
+
                         f"قیمت فعلی: "
                         f"`{fmt_num(value, NAMES[row['key']][2])}` "
                         f"{NAMES[row['key']][1]}"
+
                     ),
 
                     parse_mode=ParseMode.MARKDOWN
@@ -1642,7 +1701,7 @@ async def check_alerts(
             except Exception as e:
 
                 logger.error(
-                    "Alert failed: %s",
+                    "Alert send failed: %s",
                     e
                 )
 
@@ -1669,29 +1728,41 @@ def keyboard():
             ),
 
             InlineKeyboardButton(
-                "💵 ارز",
-                callback_data="fx"
-            )
+                "💰 کریپتو",
+                callback_data="crypto"
+            ),
         ],
 
         [
             InlineKeyboardButton(
-                "💰 کریپتو",
-                callback_data="crypto"
+                "💵 ارز",
+                callback_data="fx"
             ),
 
             InlineKeyboardButton(
                 "🛢️ نفت",
                 callback_data="oil"
-            )
+            ),
         ],
 
         [
             InlineKeyboardButton(
-                "🔔 هشدار",
+                "🚗 خودرو",
+                callback_data="cars"
+            ),
+
+            InlineKeyboardButton(
+                "📈 نمودار",
+                callback_data="chart_help"
+            ),
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🔔 هشدارها",
                 callback_data="alert_help"
-            )
-        ]
+            ),
+        ],
     ])
 
 
@@ -1700,16 +1771,24 @@ def keyboard():
 # ============================================================
 
 async def start(
-    update,
-    context
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
     await update.message.reply_text(
 
         "سلام 👋\n\n"
+
         "به ربات قیمت طلا، ارز و بازار خوش اومدی.\n\n"
-        "قیمت‌ها از منابع بازار دریافت می‌شوند "
-        "و سابقه قیمت برای محاسبه تغییرات ذخیره می‌شود.",
+
+        "📊 قیمت‌های بازار\n"
+        "🥇 طلا و سکه\n"
+        "💵 ارزهای خارجی\n"
+        "💰 ارز دیجیتال\n"
+        "🛢️ نفت\n"
+        "🚗 خودرو\n"
+        "📈 نمودار\n"
+        "🔔 هشدار قیمت",
 
         reply_markup=keyboard()
     )
@@ -1720,19 +1799,17 @@ async def start(
 # ============================================================
 
 async def price_command(
-    update,
-    context
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
     prices = (
         context.application.bot_data.get(
             "latest_prices"
         )
+        or
+        fetch_prices()
     )
-
-    if not prices:
-
-        prices = fetch_prices()
 
     await update.message.reply_text(
 
@@ -1743,12 +1820,12 @@ async def price_command(
 
 
 # ============================================================
-# BUTTON
+# BUTTON HANDLER
 # ============================================================
 
 async def button_handler(
-    update,
-    context
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
     query = update.callback_query
@@ -1759,10 +1836,9 @@ async def button_handler(
         context.application.bot_data.get(
             "latest_prices"
         )
+        or
+        fetch_prices()
     )
-
-    if not prices:
-        prices = fetch_prices()
 
     if query.data == "all":
 
@@ -1779,7 +1855,7 @@ async def button_handler(
             "mesghal",
             "ounce",
             "coin_emami",
-            "coin_half"
+            "coin_half",
         )
 
         lines = [
@@ -1789,9 +1865,7 @@ async def button_handler(
 
         for key in keys:
 
-            label, unit, decimals = (
-                NAMES[key]
-            )
+            label, unit, decimals = NAMES[key]
 
             lines.append(
                 f"• {label}: "
@@ -1799,9 +1873,7 @@ async def button_handler(
                 f"{unit}"
             )
 
-        text = "\n".join(
-            lines
-        )
+        text = "\n".join(lines)
 
     elif query.data == "crypto":
 
@@ -1811,7 +1883,7 @@ async def button_handler(
             "sol",
             "bnb",
             "xrp",
-            "usdt_toman"
+            "usdt_toman",
         )
 
         lines = [
@@ -1821,9 +1893,7 @@ async def button_handler(
 
         for key in keys:
 
-            label, unit, decimals = (
-                NAMES[key]
-            )
+            label, unit, decimals = NAMES[key]
 
             lines.append(
                 f"• {label}: "
@@ -1831,9 +1901,7 @@ async def button_handler(
                 f"{unit}"
             )
 
-        text = "\n".join(
-            lines
-        )
+        text = "\n".join(lines)
 
     elif query.data == "fx":
 
@@ -1850,9 +1918,7 @@ async def button_handler(
 
         for key in keys:
 
-            label, unit, decimals = (
-                NAMES[key]
-            )
+            label, unit, decimals = NAMES[key]
 
             lines.append(
                 f"• {label}: "
@@ -1860,30 +1926,65 @@ async def button_handler(
                 f"{unit}"
             )
 
-        text = "\n".join(
-            lines
-        )
+        text = "\n".join(lines)
 
     elif query.data == "oil":
 
-        value = prices.get(
-            "brent"
+        text = (
+
+            "🛢️ *نفت برنت*\n\n"
+
+            f"`{fmt_num(prices.get('brent'), 2)}` "
+            "دلار"
+
         )
 
+    elif query.data == "cars":
+
         text = (
-            "🛢️ *نفت برنت*\n\n"
-            f"`{fmt_num(value, 2)}` دلار "
-            "به‌ازای هر بشکه"
+
+            "🚗 *قیمت خودرو*\n\n"
+
+            "گزارش قیمت خودرو به‌صورت "
+            "روزانه منتشر می‌شود.\n\n"
+
+            "برای اضافه‌کردن قیمت خودروهای "
+            "داخلی، مونتاژی و وارداتی، "
+            "منبع قیمت باید فعال باشد."
+
+        )
+
+    elif query.data == "alert_help":
+
+        text = (
+
+            "🔔 *ساخت هشدار*\n\n"
+
+            "مثال:\n\n"
+
+            "`/alert طلا بالای 22000000`\n"
+
+            "`/alert دلار زیر 205000`\n\n"
+
+            "`/alerts` = دیدن هشدارها\n\n"
+
+            "`/cancelalert 12` = حذف هشدار شماره ۱۲"
+
         )
 
     else:
 
         text = (
-            "🔔 *هشدار قیمت*\n\n"
-            "`/alert طلا بالای 22000000`\n"
-            "`/alert دلار زیر 205000`\n\n"
-            "`/alerts` دیدن هشدارها\n"
-            "`/cancelalert 12` حذف هشدار"
+
+            "📈 *نمودار قیمت*\n\n"
+
+            "برای نمودار، تاریخچه قیمت‌ها "
+            "در دیتابیس ذخیره می‌شود.\n\n"
+
+            "در نسخه بعدی می‌توانیم "
+            "نمودار ۲۴ ساعته و ۷ روزه "
+            "را به‌صورت تصویری ارسال کنیم."
+
         )
 
     await query.edit_message_text(
@@ -1897,42 +1998,83 @@ async def button_handler(
 
 
 # ============================================================
-# LIVE CHANNEL
+# CREATE NEW LIVE MESSAGE
+# ============================================================
+
+async def create_new_live_message(
+    context,
+    prices
+):
+
+    text = live_message(
+        prices
+    )
+
+    sent = await context.bot.send_message(
+
+        chat_id=CHANNEL_ID,
+
+        text=text,
+
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    # مهم:
+    # فقط پیام قیمت فعلی را نگه می‌داریم.
+    # پیام قبلی دیگر ویرایش نمی‌شود.
+
+    set_setting(
+        "live_message_id",
+        sent.message_id
+    )
+
+    context.application.bot_data[
+        "live_message_id"
+    ] = sent.message_id
+
+    logger.info(
+        "New live message created: %s",
+        sent.message_id
+    )
+
+    return sent.message_id
+
+
+# ============================================================
+# UPDATE EXISTING LIVE MESSAGE
 # ============================================================
 
 async def update_live_channel(
-    context
+    context,
+    force_new=False
 ):
 
     if not market_is_open():
 
         logger.info(
-            "Market closed."
+            "Market closed. Live update skipped."
         )
 
-        return
+        return False
 
     try:
 
         prices = fetch_prices()
 
-        valid_count = sum(
-            1
+        valid_prices = [
+            value
             for value in prices.values()
             if value is not None
             and value > 0
-        )
+        ]
 
-        # حداقل چند داده معتبر لازم داریم
-        # تا اطلاعات خراب روی پیام قبلی ننشیند.
-        if valid_count < 5:
+        if not valid_prices:
 
             logger.warning(
-                "Not enough market data: %s",
-                valid_count
+                "No market data received."
             )
 
-            return
+            return False
 
         context.application.bot_data[
             "latest_prices"
@@ -1946,87 +2088,85 @@ async def update_live_channel(
             prices
         )
 
-        message_id = get_setting(
-            "live_message_id"
-        )
+        if force_new:
 
-        # ----------------------------------------------------
-        # EDIT EXISTING MESSAGE
-        # ----------------------------------------------------
-
-        if message_id:
-
-            try:
-
-                await context.bot.edit_message_text(
-
-                    chat_id=CHANNEL_ID,
-
-                    message_id=int(
-                        message_id
-                    ),
-
-                    text=text,
-
-                    parse_mode=ParseMode.MARKDOWN
-                )
-
-                logger.info(
-                    "Live message edited."
-                )
-
-            except Exception as e:
-
-                logger.warning(
-                    "Live edit failed: %s",
-                    e
-                )
-
-                # اگر پیام حذف شده یا ID خراب شده
-                # یک پیام جدید می‌سازیم.
-                sent = await context.bot.send_message(
-
-                    chat_id=CHANNEL_ID,
-
-                    text=text,
-
-                    parse_mode=ParseMode.MARKDOWN
-                )
-
-                set_setting(
-                    "live_message_id",
-                    sent.message_id
-                )
+            await create_new_live_message(
+                context,
+                prices
+            )
 
         else:
 
-            sent = await context.bot.send_message(
-
-                chat_id=CHANNEL_ID,
-
-                text=text,
-
-                parse_mode=ParseMode.MARKDOWN
+            message_id = (
+                context.application.bot_data.get(
+                    "live_message_id"
+                )
+                or
+                get_setting(
+                    "live_message_id"
+                )
             )
 
-            set_setting(
-                "live_message_id",
-                sent.message_id
-            )
+            if message_id:
+
+                try:
+
+                    await context.bot.edit_message_text(
+
+                        chat_id=CHANNEL_ID,
+
+                        message_id=int(
+                            message_id
+                        ),
+
+                        text=text,
+
+                        parse_mode=ParseMode.MARKDOWN
+
+                    )
+
+                    logger.info(
+                        "Live message edited: %s",
+                        message_id
+                    )
+
+                except Exception as e:
+
+                    logger.warning(
+                        "Could not edit live message: %s",
+                        e
+                    )
+
+                    await create_new_live_message(
+                        context,
+                        prices
+                    )
+
+            else:
+
+                await create_new_live_message(
+                    context,
+                    prices
+                )
 
         await check_alerts(
             context
         )
 
+        return True
+
     except Exception as e:
 
         logger.exception(
-            "Live update failed."
+            "Live update failed: %s",
+            e
         )
+
+        return False
 
 
 # ============================================================
-# MARKET UPDATE JOB
+# SMART MARKET UPDATE
 # ============================================================
 
 async def scheduled_market_update(
@@ -2036,11 +2176,9 @@ async def scheduled_market_update(
     if not market_is_open():
         return
 
-    now_ts = unix_now()
+    interval = current_update_interval()
 
-    interval = (
-        current_update_interval()
-    )
+    current_ts = now_ts()
 
     last_ts = context.application.bot_data.get(
         "last_market_update_ts",
@@ -2048,32 +2186,39 @@ async def scheduled_market_update(
     )
 
     if (
-        now_ts - last_ts
+        current_ts - last_ts
         < interval
     ):
         return
 
-    # فقط وقتی واقعاً قرار است
-    # آپدیت انجام شود timestamp را تغییر می‌دهیم.
-    await update_live_channel(
+    success = await update_live_channel(
         context
     )
 
-    context.application.bot_data[
-        "last_market_update_ts"
-    ] = now_ts
+    if success:
+
+        context.application.bot_data[
+            "last_market_update_ts"
+        ] = current_ts
+
+        logger.info(
+            "Market updated. Interval=%s seconds",
+            interval
+        )
 
 
 # ============================================================
-# HOURLY NEW MESSAGE
+# HOURLY SUMMARY + NEW LIVE MESSAGE
 # ============================================================
 
-async def hourly_job(
-    context
-):
+async def hourly_job(context):
 
-    # جمع‌بندی فقط در ساعات فعال
     if not market_is_open():
+
+        logger.info(
+            "Market closed. Hourly summary skipped."
+        )
+
         return
 
     try:
@@ -2082,25 +2227,14 @@ async def hourly_job(
             context.application.bot_data.get(
                 "latest_prices"
             )
+            or
+            fetch_prices()
         )
 
-        if not prices:
+        # ----------------------------------------------------
+        # 1. ابتدا جمع‌بندی ساعت گذشته
+        # ----------------------------------------------------
 
-            prices = fetch_prices()
-
-        valid_count = sum(
-            1
-            for value in prices.values()
-            if value is not None
-            and value > 0
-        )
-
-        if valid_count < 5:
-            return
-
-        # مهم:
-        # اینجا SEND MESSAGE داریم،
-        # نه EDIT.
         await context.bot.send_message(
 
             chat_id=CHANNEL_ID,
@@ -2113,13 +2247,34 @@ async def hourly_job(
         )
 
         logger.info(
-            "Hourly summary sent as NEW message."
+            "Hourly summary sent."
         )
 
-    except Exception:
+        # ----------------------------------------------------
+        # 2. بعد از جمع‌بندی، پیام قیمت جدید
+        # ----------------------------------------------------
+        #
+        # این قسمت مشکل اصلی کانال را حل می‌کند.
+        #
+        # پیام قبلی دیگر ویرایش نمی‌شود.
+        # یک پیام قیمت جدید در پایین کانال ساخته می‌شود.
+        #
+
+        await update_live_channel(
+            context,
+            force_new=True
+        )
+
+        # زمان آخرین آپدیت را ریست می‌کنیم
+        context.application.bot_data[
+            "last_market_update_ts"
+        ] = now_ts()
+
+    except Exception as e:
 
         logger.exception(
-            "Hourly summary failed."
+            "Hourly summary failed: %s",
+            e
         )
 
 
@@ -2127,13 +2282,14 @@ async def hourly_job(
 # DAILY SUMMARY
 # ============================================================
 
-async def daily_job(
-    context
-):
+async def daily_job(context):
 
-    # ساعت 22:30 اجرا می‌شود،
-    # قبل از بسته شدن آپدیت شبانه.
     if not market_is_open():
+
+        logger.info(
+            "Market closed. Daily summary skipped."
+        )
+
         return
 
     try:
@@ -2142,10 +2298,9 @@ async def daily_job(
             context.application.bot_data.get(
                 "latest_prices"
             )
+            or
+            fetch_prices()
         )
-
-        if not prices:
-            prices = fetch_prices()
 
         await context.bot.send_message(
 
@@ -2158,14 +2313,19 @@ async def daily_job(
             parse_mode=ParseMode.MARKDOWN
         )
 
-        logger.info(
-            "Daily summary sent."
+        # بعد از خلاصه روزانه نیز یک پیام قیمت جدید
+        # در پایین کانال ایجاد می‌کنیم.
+
+        await update_live_channel(
+            context,
+            force_new=True
         )
 
-    except Exception:
+    except Exception as e:
 
         logger.exception(
-            "Daily summary failed."
+            "Daily summary failed: %s",
+            e
         )
 
 
@@ -2190,9 +2350,9 @@ def main():
         .build()
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # COMMANDS
-    # ========================================================
+    # --------------------------------------------------------
 
     app.add_handler(
         CommandHandler(
@@ -2235,22 +2395,16 @@ def main():
         )
     )
 
-    # ========================================================
-    # LIVE MARKET
-    # ========================================================
+    # --------------------------------------------------------
+    # MARKET UPDATE
+    # --------------------------------------------------------
     #
-    # هر 60 ثانیه بررسی می‌کند.
+    # هر دقیقه بررسی می‌کنیم.
     #
-    # روز عادی:
-    #     هر 5 دقیقه
+    # روز عادی: 5 دقیقه
+    # جمعه: 30 دقیقه
+    # تعطیل رسمی: 1 ساعت
     #
-    # جمعه:
-    #     هر 15 دقیقه
-    #
-    # 23 تا 07:
-    #     هیچ کاری
-    #
-    # ========================================================
 
     app.job_queue.run_repeating(
 
@@ -2258,18 +2412,20 @@ def main():
 
         interval=60,
 
-        first=10,
-
-        name="market_update"
+        first=5
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # HOURLY SUMMARY
-    # ========================================================
+    # --------------------------------------------------------
     #
-    # هر ساعت یک پیام کاملاً جدید.
+    # هر ساعت:
     #
-    # ========================================================
+    # 1. جمع‌بندی ساعت گذشته
+    # 2. ایجاد پیام قیمت جدید
+    #
+    # بنابراین قیمت همیشه پایین کانال باقی می‌ماند.
+    #
 
     app.job_queue.run_repeating(
 
@@ -2277,59 +2433,46 @@ def main():
 
         interval=3600,
 
-        first=60,
-
-        name="hourly_summary"
+        first=3600
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # DAILY SUMMARY
-    # ========================================================
-    #
-    # هر روز ساعت 22:30 تهران
-    #
-    # ========================================================
+    # --------------------------------------------------------
 
     app.job_queue.run_daily(
 
         daily_job,
 
-        time=datetime.strptime(
-            "22:30",
-            "%H:%M"
-        ).time().replace(
+        time=time(
+            hour=22,
+            minute=55,
             tzinfo=IRAN_TZ
         ),
 
         days=tuple(
             range(7)
-        ),
-
-        name="daily_summary"
+        )
     )
 
     logger.info(
-        "================================="
+        "Tala Arz Bot V3 started."
     )
 
     logger.info(
-        "Tala Arz Bot started."
+        "Normal interval: 5 minutes"
     )
 
     logger.info(
-        "Live: 5 min / Friday: 15 min"
+        "Friday interval: 30 minutes"
     )
 
     logger.info(
-        "Hourly summary: NEW message"
+        "Official holiday interval: 60 minutes"
     )
 
     logger.info(
-        "Market hours: 07:00-23:00"
-    )
-
-    logger.info(
-        "================================="
+        "Market hours: 07:00 - 23:00"
     )
 
     app.run_polling()
@@ -2340,4 +2483,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
